@@ -24,7 +24,7 @@ class FFmpegMicrophone:
         if not __import__("sys").platform.startswith("win"): raise MicrophoneUnavailable("voice capture requires Windows")
         command = [self.ffmpeg,"-hide_banner","-loglevel","error","-f","dshow","-i",f"audio={self.device}",
                    "-ac","1","-ar","16000","-f","s16le","pipe:1"]
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         started, speech_seen, started_at = False, False, time.monotonic()
         try:
             with target.open("wb") as output:
@@ -89,6 +89,7 @@ class VoiceService:
         audio = self.tts.synthesize(text, language="he")
         player = shutil.which("ffplay")
         if not player: return
-        with tempfile.NamedTemporaryFile(suffix=".mp3") as file:
-            file.write(audio); file.flush()
-            subprocess.run([player,"-nodisp","-autoexit","-loglevel","error",file.name], check=False)
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "speech.mp3"
+            audio_path.write_bytes(audio)
+            subprocess.run([player, "-nodisp", "-autoexit", "-loglevel", "error", str(audio_path)], check=False)

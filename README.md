@@ -2,6 +2,13 @@
 
 A lightweight personal AI agent for Windows 11 with persistent memory, safe local tools, cloud LLM fallback, low-bandwidth voice, offline behavior, and an optional PHP relay. Target: i3-10110U, 8 GB RAM, integrated graphics. No Docker, GPU, database server, or model download is required.
 
+## Features and requirements
+
+- Provider-managed Groq, Gemini, OpenRouter and loopback-local LLM routing.
+- AssemblyAI/Deepgram speech recognition and optional ElevenLabs speech synthesis.
+- Bounded SQLite memory, safe Windows read tools, local VAD and resumable audio.
+- Python 3.11+ and Windows 11. FFmpeg is optional for text and required for voice.
+
 ## Quick start
 
 Requires Windows 11 and Python 3.11+. FFmpeg with `libopus` is required only for voice.
@@ -102,15 +109,20 @@ Text requests normalize whitespace, deduplicate adjacent history, keep bounded r
 - Local file tools enforce allowed roots and a 1 MB limit.
 - No shell tool or automatic replay of non-idempotent tools.
 - Central logging redacts token/key/authorization patterns.
+- Forwarded HTTPS is trusted only when explicitly enabled behind a trusted proxy.
+- See [SECURITY.md](SECURITY.md) for private reporting and deployment guidance.
 
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q src tests
+python -m pip install -e ".[dev]"
+python -m compileall -q src tests
+ruff check src tests
+coverage run -m unittest discover -s tests -v
+coverage report
 ```
 
-Commercial APIs are mocked. With PHP CLI, a local relay integration test checks auth and invalid upload handling without external traffic.
+Commercial APIs are mocked. Coverage measures production Python with branches and enforces 80%; methodology is in [docs/QUALITY.md](docs/QUALITY.md). CI also runs Windows tests and PHP syntax validation. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Optional components
 

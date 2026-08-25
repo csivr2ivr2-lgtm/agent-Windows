@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping, Sequence
 import sqlite3
 import time
@@ -37,19 +38,20 @@ class SQLiteMemoryStore:
         self.max_items = max_items
         self._initialize()
 
-    def _connect(self):
+    def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5)
         connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA integrity_check")
         return connection
 
-    def _initialize(self):
+    def _initialize(self) -> None:
         with self._connect() as db:
+            result = db.execute("PRAGMA quick_check").fetchone()
+            if result is None or result[0] != "ok":
+                raise sqlite3.DatabaseError("memory database integrity check failed")
             db.execute("CREATE TABLE IF NOT EXISTS memories(id INTEGER PRIMARY KEY, text TEXT UNIQUE NOT NULL, created REAL NOT NULL, metadata TEXT)")
             db.execute("CREATE INDEX IF NOT EXISTS memories_created ON memories(created)")
 
     def remember(self, text: str, *, metadata: Mapping[str, Any] | None = None) -> None:
-        import json
         clean = text.strip()
         if not clean:
             return

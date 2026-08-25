@@ -7,7 +7,16 @@ from typing import Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .errors import ProviderConnectionError, ProviderTimeout
+from .errors import ProviderBadResponse, ProviderConnectionError, ProviderTimeout
+
+MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def _read_limited(stream, limit: int = MAX_JSON_RESPONSE_BYTES) -> bytes:
+    body = stream.read(limit + 1)
+    if len(body) > limit:
+        raise ProviderBadResponse(f"HTTP response exceeded {limit} bytes")
+    return body
 
 
 @dataclass(frozen=True)
@@ -36,9 +45,9 @@ class UrllibTransport:
         )
         try:
             with urlopen(request, timeout=timeout) as response:
-                return HTTPResponse(response.status, response.read(), dict(response.headers.items()))
+                return HTTPResponse(response.status, _read_limited(response), dict(response.headers.items()))
         except HTTPError as exc:
-            return HTTPResponse(exc.code, exc.read(), dict(exc.headers.items()))
+            return HTTPResponse(exc.code, _read_limited(exc), dict(exc.headers.items()))
         except (TimeoutError, socket.timeout) as exc:
             raise ProviderTimeout(str(exc) or "request timed out") from exc
         except URLError as exc:

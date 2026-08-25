@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
-import os
 import platform
 import shutil
+import heapq
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -38,8 +37,9 @@ def build_windows_tools(allowed_roots: tuple[Path, ...]) -> list[FunctionTool]:
                 "python": platform.python_version(), "disk_free_bytes": usage.free}
     def list_dir(args):
         path = _safe_path(str(args.get("path", ".")), roots)
+        entries = heapq.nsmallest(200, path.iterdir(), key=lambda entry: entry.name.casefold())
         return [{"name": p.name, "type": "dir" if p.is_dir() else "file", "size": p.stat().st_size if p.is_file() else None}
-                for p in sorted(path.iterdir())[:200]]
+                for p in entries]
     def read_text(args):
         path = _safe_path(str(args["path"]), roots)
         if path.stat().st_size > 1_000_000:

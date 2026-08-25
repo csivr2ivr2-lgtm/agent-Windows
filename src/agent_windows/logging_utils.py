@@ -4,11 +4,15 @@ import logging
 import re
 
 
-_SECRET = re.compile(r"(?i)(authorization|api[_-]?key|token|secret)(\s*[:=]\s*)([^\s,;]+)")
+_AUTHORIZATION = re.compile(r"(?i)\bauthorization\s*[:=]\s*[^\r\n]+")
+_BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_SECRET = re.compile(r"(?i)\b(api[_-]?key|token|secret)(\s*[:=]\s*)([^\s,;]+)")
 
 
 def redact(value: object) -> str:
-    return _SECRET.sub(r"\1\2[REDACTED]", str(value))
+    redacted = _AUTHORIZATION.sub("Authorization: [REDACTED]", str(value))
+    redacted = _BEARER.sub("Bearer [REDACTED]", redacted)
+    return _SECRET.sub(r"\1\2[REDACTED]", redacted)
 
 
 class RedactingFormatter(logging.Formatter):
@@ -22,4 +26,3 @@ def configure_logging(level: str = "INFO") -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
-

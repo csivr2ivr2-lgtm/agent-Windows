@@ -79,6 +79,8 @@ class OpenAICompatibleProvider:
                 arguments = function.get("arguments") or {}
                 if isinstance(arguments, str):
                     arguments = json.loads(arguments)
+                if not isinstance(arguments, Mapping):
+                    raise TypeError("tool arguments must be an object")
                 calls.append(ToolCall(function["name"], arguments))
             return LLMResponse(message.get("content") or "", calls, self.name)
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:

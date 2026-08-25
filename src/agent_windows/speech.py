@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import time
 from dataclasses import dataclass
 from typing import Mapping, Protocol
@@ -9,7 +10,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 from .errors import ProviderAuthenticationError, ProviderBadResponse, ProviderConnectionError, ProviderRateLimited, ProviderServerError, ProviderTimeout
-from .http import HTTPResponse
+from .http import HTTPResponse, _read_limited
 
 
 class BinaryHTTPClient(Protocol):
@@ -20,13 +21,17 @@ class UrllibBinaryClient:
     def request(self, method, url, headers, body, timeout):
         try:
             with urlopen(Request(url, data=body, headers=dict(headers), method=method), timeout=timeout) as response:
-                return HTTPResponse(response.status, response.read(), dict(response.headers.items()))
+                return HTTPResponse(response.status, _read_limited(response, 32 * 1024 * 1024), dict(response.headers.items()))
         except HTTPError as exc:
-            return HTTPResponse(exc.code, exc.read(), dict(exc.headers.items()))
-        except TimeoutError as exc:
+            return HTTPResponse(exc.code, _read_limited(exc), dict(exc.headers.items()))
+        except (TimeoutError, socket.timeout) as exc:
             raise ProviderTimeout(str(exc)) from exc
         except URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                raise ProviderTimeout(str(exc.reason)) from exc
             raise ProviderConnectionError(str(exc.reason)) from exc
+        except OSError as exc:
+            raise ProviderConnectionError(str(exc)) from exc
 
 
 def _check(response: HTTPResponse, provider: str):

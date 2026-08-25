@@ -50,6 +50,9 @@ class ProviderManager:
         network_monitor=None,
     ) -> None:
         self.providers = tuple(providers)
+        names = [provider.name for provider in providers]
+        if len(names) != len(set(names)):
+            raise ValueError("provider names must be unique")
         self.retry_policy = retry_policy or RetryPolicy()
         self._clock = clock
         self._sleep = sleep

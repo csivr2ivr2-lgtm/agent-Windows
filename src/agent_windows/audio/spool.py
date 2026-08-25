@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Iterator
 
@@ -23,19 +24,40 @@ class OfflineAudioSpool:
         directory = self._session_dir(chunk.session_id)
         directory.mkdir(parents=True, exist_ok=True)
         if session_metadata is not None:
-            (directory / "session.json").write_text(json.dumps({"session_id":chunk.session_id,**session_metadata},separators=(",",":")),encoding="utf-8")
+            self._atomic_write(
+                directory / "session.json",
+                json.dumps({"session_id": chunk.session_id, **session_metadata}, separators=(",", ":")).encode(),
+            )
         stem = f"{chunk.sequence:012d}"
         payload_path = directory / f"{stem}.audio"
         metadata_path = directory / f"{stem}.json"
-        payload_path.write_bytes(chunk.payload)
-        metadata_path.write_text(json.dumps({
+        if payload_path.exists():
+            existing = hashlib.sha256(payload_path.read_bytes()).hexdigest()
+            if existing != chunk.checksum:
+                raise ValueError(f"offline audio chunk conflict: {chunk.sequence}")
+        else:
+            self._atomic_write(payload_path, chunk.payload)
+        self._atomic_write(metadata_path, json.dumps({
             "session_id": chunk.session_id,
             "sequence": chunk.sequence,
             "timestamp_ms": chunk.timestamp_ms,
             "checksum": chunk.checksum,
             "final": chunk.final,
-        }, separators=(",", ":")), encoding="utf-8")
+        }, separators=(",", ":")).encode())
         self._enforce_limit()
+
+    @staticmethod
+    def _atomic_write(path: Path, content: bytes) -> None:
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            with temporary.open("xb") as output:
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def iter_session(self, session_id: str) -> Iterator[AudioChunk]:
         directory = self._session_dir(session_id)

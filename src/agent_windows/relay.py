@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from .audio import AudioChunk, AudioTransport, ChunkAck
-from .errors import ProviderAuthenticationError, ProviderBadResponse, ProviderConnectionError
+from .errors import ProviderError
 from .speech import BinaryHTTPClient, UrllibBinaryClient, _check
 
 
@@ -13,7 +13,12 @@ class RelayAudioTransport(AudioTransport):
         self.base_url, self.token, self.client, self.timeout = base_url.rstrip("/"), token, client or UrllibBinaryClient(), timeout
         self.received_sequences: dict[str, set[int]] = {}
 
-    def is_available(self): return bool(self.base_url.startswith("https://") and self.token)
+    def is_available(self):
+        parsed = urlsplit(self.base_url)
+        return bool(
+            parsed.scheme == "https" and parsed.hostname and not parsed.username
+            and not parsed.password and not parsed.query and not parsed.fragment and self.token
+        )
     def _headers(self, content_type="application/json"):
         return {"Authorization": f"Bearer {self.token}", "Content-Type": content_type}
 
@@ -22,7 +27,7 @@ class RelayAudioTransport(AudioTransport):
         try:
             response = self.client.request("GET", self.base_url + "/v1/health", self._headers(), None, min(10, self.timeout))
             return response.status == 200
-        except Exception: return False
+        except (ProviderError, OSError, ValueError): return False
 
     def open(self, session_id: str, metadata: dict) -> None:
         body = json.dumps({"session_id": session_id, "resume": True, **metadata}).encode()
