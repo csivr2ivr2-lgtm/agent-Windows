@@ -46,8 +46,12 @@ class SQLiteMemoryStore:
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5)
-        connection.execute("PRAGMA journal_mode=WAL")
-        return connection
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            return connection
+        except BaseException:
+            connection.close()
+            raise
 
     def _initialize(self) -> None:
         with self._database() as db:
