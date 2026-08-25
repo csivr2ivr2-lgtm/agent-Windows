@@ -25,6 +25,12 @@ class DummyRuntime:
     def handle_text(self, text):
         return f"answer:{text}"
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        return None
+
 
 class CLIDiagnosticsTests(unittest.TestCase):
     def test_status_outputs_json(self):
@@ -74,7 +80,7 @@ class CLIDiagnosticsTests(unittest.TestCase):
 
     def test_memory_detection_handles_platform_errors(self):
         with patch("agent_windows.diagnostics.sys.platform", "linux"), \
-             patch("agent_windows.diagnostics.os.sysconf", side_effect=OSError("unsupported")):
+             patch("agent_windows.diagnostics.os.sysconf", side_effect=OSError("unsupported"), create=True):
             self.assertIsNone(total_memory_bytes())
 
 

@@ -71,6 +71,15 @@ class AgentRuntime:
             self.spool.delete_session(session_id); completed += 1
         return completed
 
+    def close(self) -> None:
+        self.memory.close()
+
+    def __enter__(self) -> "AgentRuntime":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
+
 
 def build_runtime(dotenv=".env") -> AgentRuntime:
     return AgentRuntime(Settings.from_env(dotenv))

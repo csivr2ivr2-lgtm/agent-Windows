@@ -60,24 +60,28 @@ def settings(root, **overrides):
 class MVPTests(unittest.TestCase):
     def test_persistent_memory_survives_restart_and_deletes(self):
         with tempfile.TemporaryDirectory() as directory:
-            path=Path(directory)/"memory.db"; SQLiteMemoryStore(path).remember("Ari likes lightweight agents")
-            reopened=SQLiteMemoryStore(path); self.assertEqual(len(reopened.search("lightweight")),1)
-            self.assertEqual(reopened.delete(),1); self.assertEqual(reopened.search("lightweight"),[])
+            path=Path(directory)/"memory.db"
+            with SQLiteMemoryStore(path) as initial:
+                initial.remember("Ari likes lightweight agents")
+            with SQLiteMemoryStore(path) as reopened:
+                self.assertEqual(len(reopened.search("lightweight")),1)
+                self.assertEqual(reopened.delete(),1); self.assertEqual(reopened.search("lightweight"),[])
 
     def test_complete_text_conversation_with_tool_and_memory(self):
         with tempfile.TemporaryDirectory() as directory:
-            runtime=AgentRuntime(settings(directory))
-            provider=RepliesProvider("fake",[LLMResponse(tool_calls=[ToolCall("current_time",{})]),LLMResponse(text="done",provider="fake")])
-            runtime.provider_manager=ProviderManager([provider],network_monitor=runtime.network)
-            runtime.agent.router.manager=runtime.provider_manager
-            self.assertEqual(runtime.handle_text("what time is it"),"done")
-            self.assertTrue(runtime.memory.search("time"))
+            with AgentRuntime(settings(directory)) as runtime:
+                provider=RepliesProvider("fake",[LLMResponse(tool_calls=[ToolCall("current_time",{})]),LLMResponse(text="done",provider="fake")])
+                runtime.provider_manager=ProviderManager([provider],network_monitor=runtime.network)
+                runtime.agent.router.manager=runtime.provider_manager
+                self.assertEqual(runtime.handle_text("what time is it"),"done")
+                self.assertTrue(runtime.memory.search("time"))
 
     def test_offline_runtime_keeps_local_tools(self):
         with tempfile.TemporaryDirectory() as directory:
-            runtime=AgentRuntime(settings(directory)); runtime.network.state=NetworkState.OFFLINE
-            result=json.loads(runtime.handle_text("/tool current_time")); self.assertIn("T",result)
-            self.assertIn("Offline reasoning",runtime.handle_text("reason about this"))
+            with AgentRuntime(settings(directory)) as runtime:
+                runtime.network.state=NetworkState.OFFLINE
+                result=json.loads(runtime.handle_text("/tool current_time")); self.assertIn("T",result)
+                self.assertIn("Offline reasoning",runtime.handle_text("reason about this"))
 
     def test_network_transitions_and_adaptive_policy(self):
         network=NetworkMonitor()
@@ -114,8 +118,9 @@ class MVPTests(unittest.TestCase):
 
     def test_missing_keys_are_safely_unavailable_and_diagnostics_redact(self):
         with tempfile.TemporaryDirectory() as directory:
-            runtime=AgentRuntime(settings(directory)); report=collect(runtime)
-            self.assertFalse(any(report["providers"].values())); self.assertFalse(any(report["stt"].values()))
+            with AgentRuntime(settings(directory)) as runtime:
+                report=collect(runtime)
+                self.assertFalse(any(report["providers"].values())); self.assertFalse(any(report["stt"].values()))
         self.assertNotIn("secret123",redact("Authorization: secret123 api_key=another"))
 
     def test_relay_transport_auth_headers_and_validation(self):

@@ -110,13 +110,34 @@ class HardeningTests(unittest.TestCase):
 
     def test_sqlite_dedup_bounds_delete_and_corruption(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "memory.db"; store = SQLiteMemoryStore(path, max_items=2)
-            store.remember("first memory"); store.remember("first memory"); store.remember("second memory"); store.remember("third memory")
-            self.assertEqual(len(store.search("memory", limit=10)), 2)
-            self.assertEqual(store.delete(999999), 0)
+            path = Path(directory) / "memory.db"
+            with SQLiteMemoryStore(path, max_items=2) as store:
+                store.remember("first memory"); store.remember("first memory"); store.remember("second memory"); store.remember("third memory")
+                self.assertEqual(len(store.search("memory", limit=10)), 2)
+                self.assertEqual(store.delete(999999), 0)
             path.unlink(); Path(str(path) + "-wal").unlink(missing_ok=True); Path(str(path) + "-shm").unlink(missing_ok=True)
             path.write_bytes(b"not sqlite")
             with self.assertRaises(sqlite3.DatabaseError): SQLiteMemoryStore(path)
+
+    def test_sqlite_explicit_close_is_idempotent_and_releases_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "close.db"
+            store = SQLiteMemoryStore(path)
+            store.remember("persisted")
+            store.close()
+            store.close()
+            path.unlink()
+            self.assertFalse(path.exists())
+
+    def test_sqlite_context_manager_releases_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "context.db"
+            with SQLiteMemoryStore(path) as store:
+                store.remember("persisted")
+            with self.assertRaises(RuntimeError):
+                store.search("persisted")
+            path.unlink()
+            self.assertFalse(path.exists())
 
     def test_in_memory_store_deduplicates_and_ignores_empty(self):
         store = InMemoryStore(); store.remember(" hello "); store.remember("hello"); store.remember(" ")

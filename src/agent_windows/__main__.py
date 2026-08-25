@@ -20,7 +20,12 @@ def main(argv=None) -> int:
     sub.add_parser("chat"); sub.add_parser("voice"); sub.add_parser("status")
     doctor=sub.add_parser("doctor"); doctor.add_argument("--llmfit",action="store_true")
     sub.add_parser("benchmark")
-    args=parser.parse_args(argv); settings=Settings.from_env(args.env); configure_logging(settings.log_level); runtime=AgentRuntime(settings)
+    args=parser.parse_args(argv); settings=Settings.from_env(args.env); configure_logging(settings.log_level)
+    with AgentRuntime(settings) as runtime:
+        return _run(args, runtime)
+
+
+def _run(args, runtime) -> int:
     if runtime.relay and args.command in {"chat","voice"}:
         try: runtime.recover_audio()
         except Exception as exc: logging.getLogger(__name__).warning("offline audio recovery deferred: %s",exc)

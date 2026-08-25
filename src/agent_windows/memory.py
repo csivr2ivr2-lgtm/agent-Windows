@@ -36,7 +36,13 @@ class SQLiteMemoryStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.max_items = max_items
-        self._initialize()
+        self._connection: sqlite3.Connection | None = None
+        try:
+            self._connection = self._connect()
+            self._initialize()
+        except BaseException:
+            self.close()
+            raise
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5)
@@ -44,7 +50,7 @@ class SQLiteMemoryStore:
         return connection
 
     def _initialize(self) -> None:
-        with self._connect() as db:
+        with self._database() as db:
             result = db.execute("PRAGMA quick_check").fetchone()
             if result is None or result[0] != "ok":
                 raise sqlite3.DatabaseError("memory database integrity check failed")
@@ -55,7 +61,7 @@ class SQLiteMemoryStore:
         clean = text.strip()
         if not clean:
             return
-        with self._connect() as db:
+        with self._database() as db:
             db.execute("INSERT OR IGNORE INTO memories(text,created,metadata) VALUES(?,?,?)",
                        (clean, time.time(), json.dumps(metadata or {}, ensure_ascii=False)))
             db.execute("DELETE FROM memories WHERE id IN (SELECT id FROM memories ORDER BY created DESC LIMIT -1 OFFSET ?)",
@@ -67,13 +73,31 @@ class SQLiteMemoryStore:
             return []
         where = " OR ".join("text LIKE ? ESCAPE '\\'" for _ in terms)
         escaped = [term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") for term in terms]
-        with self._connect() as db:
+        with self._database() as db:
             rows = db.execute(f"SELECT text FROM memories WHERE {where} ORDER BY created DESC LIMIT ?",
                               (*[f"%{term}%" for term in escaped], max(0, limit))).fetchall()
         return [row[0] for row in rows]
 
     def delete(self, memory_id: int | None = None) -> int:
-        with self._connect() as db:
+        with self._database() as db:
             cursor = db.execute("DELETE FROM memories" if memory_id is None else "DELETE FROM memories WHERE id=?",
                                 () if memory_id is None else (memory_id,))
             return cursor.rowcount
+
+    def _database(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise RuntimeError("memory store is closed")
+        return self._connection
+
+    def close(self) -> None:
+        """Close the database handle. Repeated calls are safe."""
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            connection.close()
+
+    def __enter__(self) -> "SQLiteMemoryStore":
+        self._database()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
