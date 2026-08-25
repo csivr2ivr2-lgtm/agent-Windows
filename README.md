@@ -8,6 +8,8 @@ Lightweight, provider-agnostic foundation for a personal Windows AI agent. The t
 
 The current core implements the text-path contracts, real Groq/Gemini/OpenRouter adapters, provider health and fallback, tool execution, and a zero-dependency in-memory backend. Voice remains a later adapter.
 
+The low-bandwidth voice foundation is also implemented as testable interfaces: local VAD, negotiated audio profiles, incremental chunking, acknowledgements, per-chunk retry and resumable sessions. See [`docs/low-bandwidth-audio.md`](docs/low-bandwidth-audio.md).
+
 ## Architectural decisions
 
 - **Own thin orchestrator for the MVP.** Hermes Agent and OpenHuman overlap heavily and would make the first runtime larger and harder to control. Hermes remains a future integration candidate; OpenHuman remains an evaluation candidate, not a second orchestrator.
@@ -91,10 +93,11 @@ No API key is needed for the core tests. Copy `.env.example` to `.env` only when
 
 1. Core contracts, fallback router, memory, tool registry, tests. **Implemented.**
 2. Groq/Gemini/OpenRouter adapters with mocked HTTP tests, timeouts, cooldowns, retries, health state, and fallback. **Implemented.**
-3. Persistent local SQLite memory; benchmark OpenViking and hosted vector backends separately.
-4. Safe Windows tool pack with risk classes, confirmation, audit log, and dry-run.
-5. LiveKit voice path; select STT/TTS only after checking current Hebrew quality, latency, and free-tier terms.
-6. Run llmfit on the target PC; optionally benchmark Needle for non-destructive tool routing.
+3. Low-bandwidth audio contracts, local VAD baseline, adaptive profiles and resumable PHP-relay protocol. **Implemented without live uploads.**
+4. Persistent local SQLite memory; benchmark OpenViking and hosted vector backends separately.
+5. Safe Windows tool pack with risk classes, confirmation, audit log, and dry-run.
+6. LiveKit voice path and real encoder/transports; benchmark Hebrew STT quality before locking bitrate/VAD thresholds.
+7. Run llmfit on the target PC; optionally benchmark Needle for non-destructive tool routing.
 
 ## Free-tier rule
 
