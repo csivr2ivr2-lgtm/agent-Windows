@@ -177,10 +177,24 @@ class PHPRelayIntegrationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.temp=tempfile.TemporaryDirectory(); sock=socket.socket(); sock.bind(("127.0.0.1",0)); cls.port=sock.getsockname()[1]; sock.close()
         env=os.environ.copy(); env.update(RELAY_AGENT_TOKEN="x"*32,RELAY_STORAGE_DIR=cls.temp.name,RELAY_REQUIRE_HTTPS="false",RELAY_RATE_LIMIT_PER_MINUTE="1000")
-        cls.process=subprocess.Popen([shutil.which("php"),"-S",f"127.0.0.1:{cls.port}","-t","relay/public","relay/public/index.php"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env)
-        time.sleep(.4)
+        root=Path(__file__).resolve().parents[1]; public=root/"relay"/"public"; router=public/"index.php"
+        cls.process=subprocess.Popen([shutil.which("php"),"-S",f"127.0.0.1:{cls.port}","-t",str(public),str(router)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,env=env)
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline:
+            if cls.process.poll() is not None:
+                details=(cls.process.stderr.read() if cls.process.stderr else b"").decode(errors="replace")
+                cls.temp.cleanup(); raise RuntimeError("PHP relay failed to start: "+details[-500:])
+            try:
+                with socket.create_connection(("127.0.0.1",cls.port),timeout=.2): return
+            except OSError: time.sleep(.1)
+        cls.process.terminate(); cls.process.wait(timeout=3); cls.temp.cleanup()
+        raise RuntimeError("PHP relay did not become ready within 5 seconds")
     @classmethod
-    def tearDownClass(cls): cls.process.terminate(); cls.process.wait(timeout=3); cls.temp.cleanup()
+    def tearDownClass(cls):
+        if cls.process.poll() is None: cls.process.terminate()
+        cls.process.wait(timeout=3)
+        if cls.process.stderr: cls.process.stderr.close()
+        cls.temp.cleanup()
     def request(self,path,method="GET",body=None,headers=None):
         try:
             with urlopen(Request(f"http://127.0.0.1:{self.port}{path}",data=body,method=method,headers=headers or {}),timeout=3) as r:return r.status,r.read()
