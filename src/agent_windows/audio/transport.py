@@ -5,6 +5,7 @@ from itertools import chain
 from typing import Iterable, Protocol
 
 from .chunking import AudioChunk, UploadSession
+from ..errors import ProviderConnectionError, ProviderTimeout
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ class ResilientUploader:
                         state.acknowledge(chunk.sequence)
                         last_error = None
                         break
-                except (TimeoutError, ConnectionError) as exc:
+                except (TimeoutError, ConnectionError, ProviderConnectionError, ProviderTimeout) as exc:
                     last_error = exc
             if last_error is not None or state.needs(chunk.sequence):
                 raise UploadInterrupted(f"chunk {chunk.sequence} was not acknowledged", state)

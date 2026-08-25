@@ -47,16 +47,36 @@ class ProviderManager:
         retry_policy: RetryPolicy | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        network_monitor=None,
     ) -> None:
         self.providers = tuple(providers)
         self.retry_policy = retry_policy or RetryPolicy()
         self._clock = clock
         self._sleep = sleep
+        self.network_monitor = network_monitor
         self.health = {provider.name: ProviderHealth() for provider in providers}
+
+    def apply_network_policy(self, policy: Mapping[str, Any]) -> None:
+        self.retry_policy = RetryPolicy(
+            max_attempts=int(policy.get("attempts", self.retry_policy.max_attempts)),
+            base_delay=self.retry_policy.base_delay, max_delay=self.retry_policy.max_delay,
+            transient_cooldown=self.retry_policy.transient_cooldown,
+            rate_limit_cooldown=self.retry_policy.rate_limit_cooldown,
+            auth_cooldown=self.retry_policy.auth_cooldown,
+        )
+        providers = self.providers
+        if self.network_monitor and self.network_monitor.state.value == "POOR":
+            providers = tuple(sorted(providers, key=lambda provider: provider.name != "local"))
+        for provider in providers:
+            if hasattr(provider, "timeout"):
+                provider.timeout = float(policy.get("timeout", provider.timeout))
 
     def complete(self, messages: Sequence[Message], tools: Sequence[Mapping[str, Any]]) -> LLMResponse:
         failures = []
         for provider in self.providers:
+            if self.network_monitor and self.network_monitor.state.value == "OFFLINE" and provider.name != "local":
+                failures.append(f"{provider.name}: offline")
+                continue
             state = self.health[provider.name]
             now = self._clock()
             if not provider.is_available():
@@ -66,13 +86,17 @@ class ProviderManager:
                 failures.append(f"{provider.name}: cooldown")
                 continue
             try:
+                started = self._clock()
                 response = self._attempt(provider, messages, tools)
+                if self.network_monitor:
+                    self.network_monitor.record(latency_ms=(self._clock()-started)*1000, success=True)
                 state.healthy = True
                 state.consecutive_failures = 0
                 state.cooldown_until = 0.0
                 state.last_error = None
                 return response
             except ProviderError as exc:
+                if self.network_monitor: self.network_monitor.record(success=False)
                 self._record_failure(state, exc)
                 logger.warning("LLM provider %s failed: %s", provider.name, exc)
                 failures.append(f"{provider.name}: {exc}")

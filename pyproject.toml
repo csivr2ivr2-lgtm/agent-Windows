@@ -9,6 +9,9 @@ description = "A lightweight, provider-agnostic personal AI agent for Windows"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+agent-windows = "agent_windows.__main__:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
 
@@ -21,4 +24,3 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-

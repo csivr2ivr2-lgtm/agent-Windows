@@ -17,13 +17,11 @@ class FFmpegCapabilities:
     executable: str = "ffmpeg"
 
     def supported_codecs(self) -> set[str]:
-        result = subprocess.run(
-            [self.executable, "-hide_banner", "-encoders"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        try:
+            result = subprocess.run([self.executable, "-hide_banner", "-encoders"], capture_output=True,
+                                    text=True, timeout=10, check=False)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return set()
         output = result.stdout + result.stderr
         codecs = {"pcm_s16le"}
         if "libopus" in output:

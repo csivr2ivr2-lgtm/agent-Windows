@@ -1,104 +1,133 @@
 # agent-Windows
 
-Lightweight, provider-agnostic foundation for a personal Windows AI agent. The target machine is Windows 11 with an Intel i3-10110U, 8 GB RAM, and integrated graphics, so the runtime keeps orchestration local and sends heavy inference to replaceable cloud providers.
+A lightweight personal AI agent for Windows 11 with persistent memory, safe local tools, cloud LLM fallback, low-bandwidth voice, offline behavior, and an optional PHP relay. Target: i3-10110U, 8 GB RAM, integrated graphics. No Docker, GPU, database server, or model download is required.
 
-## MVP flow
+## Quick start
 
-`voice/text -> STT -> orchestrator -> memory -> LLM router -> tool -> response -> TTS -> memory`
-
-The current core implements the text-path contracts, real Groq/Gemini/OpenRouter adapters, provider health and fallback, tool execution, and a zero-dependency in-memory backend. Voice remains a later adapter.
-
-The low-bandwidth voice foundation is also implemented as testable interfaces: local VAD, negotiated audio profiles, incremental chunking, acknowledgements, per-chunk retry and resumable sessions. See [`docs/low-bandwidth-audio.md`](docs/low-bandwidth-audio.md).
-
-## Architectural decisions
-
-- **Own thin orchestrator for the MVP.** Hermes Agent and OpenHuman overlap heavily and would make the first runtime larger and harder to control. Hermes remains a future integration candidate; OpenHuman remains an evaluation candidate, not a second orchestrator.
-- **LiveKit Agents: optional voice adapter.** Use its Python framework and cloud service when realtime voice enters the MVP. Do not self-host the LiveKit server on the 8 GB laptop by default.
-- **Needle: optional local tool router.** Its tiny bounded-memory design is promising for simple tool selection. It must pass Windows/CPU accuracy and latency tests before it can decide actions with side effects.
-- **OpenViking: optional context backend.** Evaluate it behind `MemoryStore`. The default remains lightweight until its process footprint and AGPL implications are accepted.
-- **llmfit: diagnostic only.** Run on demand to produce hardware recommendations; do not keep it resident.
-- **Unsloth and Soup: development/future tools.** Neither is part of the running agent. Training on the current integrated GPU is not an MVP goal.
-
-## Repository evaluation snapshot (2026-08-25)
-
-| Project | Decision | Reason |
-|---|---|---|
-| llmfit | Adopt later as on-demand diagnostic | Windows support, JSON automation output, MIT; useful without runtime coupling. |
-| Needle | Prototype behind tool-routing interface | Very small function-calling model and bounded memory; validate reliability before computer control. |
-| OpenViking | Prototype as memory adapter | Strong memory/RAG/skills model, but it is a separate context service and AGPL-3.0. |
-| LiveKit Agents | Adopt for voice milestone | Mature realtime STT/LLM/TTS adapter ecosystem and Apache-2.0. |
-| Hermes Agent | Reference/evaluate, not MVP dependency | Capable and Windows-aware, but duplicates orchestration/tools/memory and increases footprint. |
-| OpenHuman | Leave out of MVP | Overlaps Hermes and the core; early beta and GPL-3.0. |
-| Unsloth | Optional offline/remote workflow | Supports Windows/Intel/CPU, but model running/training is not required for the cloud-first MVP. |
-| Soup | Future remote-GPU fine-tuning | Apache-2.0 and efficient GPU training, but published laptop result still assumes a discrete NVIDIA GPU. |
-
-Licences must be reviewed again before distributing a build that embeds or modifies AGPL/GPL components. Calling a separately deployed service through an adapter is intentionally distinct from copying its code into this repository.
-
-## Core boundaries
-
-- `LLMProvider`: availability plus completion/tool calls.
-- `SpeechToText` and `TextToSpeech`: raw audio adapters.
-- `MemoryStore`: search and remember.
-- `Tool`: JSON-schema declaration and invocation.
-- `ProviderManager`: bounded retry, health state, cooldown and ordered fallback.
-- `LLMRouter`: stable facade used by the orchestrator.
-
-Provider order is configured rather than hard-coded: Groq, Gemini, OpenRouter, then a viable local OpenAI-compatible endpoint. The adapters use Python's standard-library HTTP client, so this milestone adds no runtime dependency.
-
-Failure policy:
-
-- HTTP 401/403: authentication failure, no retry, long cooldown, then fallback.
-- HTTP 429: no immediate retry; honor numeric `Retry-After` when present, then fallback.
-- Timeout, connection error, or HTTP 5xx: bounded exponential retry, transient cooldown after exhaustion, then fallback.
-- Other non-2xx or malformed JSON: bad response, no retry, then fallback.
-- Providers without both a key and model are skipped without a network request.
-
-Cooldown is per provider and kept in memory. It prevents hammering a failed service; it does not rotate accounts or bypass limits. API keys are passed only in provider-specific headers and must come from local environment configuration.
-
-## Provider adapters
-
-```python
-from agent_windows.provider_manager import ProviderManager, RetryPolicy
-from agent_windows.providers import GeminiProvider, GroqProvider, OpenRouterProvider
-from agent_windows.router import LLMRouter
-
-manager = ProviderManager([
-    GroqProvider(api_key="...", model="..."),
-    GeminiProvider(api_key="...", model="..."),
-    OpenRouterProvider(api_key="...", model="..."),
-], retry_policy=RetryPolicy(max_attempts=2))
-router = LLMRouter(manager)
-```
-
-The example contains placeholders only. Do not hard-code credentials in application code.
-
-## Safety model for Windows tools
-
-Tools are allowlisted. Read-only actions may run directly; writes, process execution, credential access, external messages, purchases, and destructive actions require an explicit policy/confirmation layer. Needle or any LLM proposes calls—it never receives unrestricted shell access.
-
-## Local development
-
-Requires Python 3.11+.
+Requires Windows 11 and Python 3.11+. FFmpeg with `libopus` is required only for voice.
 
 ```powershell
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -e .
-python -m unittest discover -s tests -v
+git clone https://github.com/csivr2ivr2-lgtm/agent-Windows.git
+cd agent-Windows
+powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+notepad .env
+.\.venv\Scripts\agent-windows.exe doctor
+.\.venv\Scripts\agent-windows.exe chat
 ```
 
-No API key is needed for the core tests. Copy `.env.example` to `.env` only when adding provider adapters.
+Setup creates a user virtual environment, installs the package, and copies `.env.example`. It does not require Administrator, change security settings, install system software, or download models.
 
-## Milestones
+## Commands
 
-1. Core contracts, fallback router, memory, tool registry, tests. **Implemented.**
-2. Groq/Gemini/OpenRouter adapters with mocked HTTP tests, timeouts, cooldowns, retries, health state, and fallback. **Implemented.**
-3. Low-bandwidth audio contracts, local VAD baseline, adaptive profiles and resumable PHP-relay protocol. **Implemented without live uploads.**
-4. Persistent local SQLite memory; benchmark OpenViking and hosted vector backends separately.
-5. Safe Windows tool pack with risk classes, confirmation, audit log, and dry-run.
-6. LiveKit voice path and real encoder/transports; benchmark Hebrew STT quality before locking bitrate/VAD thresholds.
-7. Run llmfit on the target PC; optionally benchmark Needle for non-destructive tool routing.
+- `agent-windows chat` — interactive text agent.
+- `agent-windows voice` — capture one utterance, transcribe, answer, synthesize, play.
+- `agent-windows status` — configuration and health without secrets.
+- `agent-windows doctor [--llmfit]` — diagnostics; llmfit runs only when requested.
+- `agent-windows benchmark` — local payload/VAD/audio measurements; no API traffic.
 
-## Free-tier rule
+Offline commands:
 
-Quotas and prices are operational configuration, never constants copied from a README. Before enabling a provider, verify its current official pricing/limits and terms. Fallback provides reliability; it must not rotate identities, accounts, or keys to evade limits.
+```text
+/tool current_time
+/tool system_info
+/tool list_directory {"path":"."}
+/tool read_text_file {"path":"README.md"}
+/memory lightweight
+```
+
+Paths are restricted to the project and data directory. There is no arbitrary shell tool.
+
+## Architecture
+
+```text
+Text -> optimizer -> SQLite memory -> LLM Router -> ProviderManager
+                                |             -> Groq/Gemini/OpenRouter/local
+                                +-> ToolRegistry -> safe Windows tools
+
+Microphone -> EnergyVAD -> FFmpeg encoder -> network profile
+           -> PHP relay chunks or direct STT -> Agent -> ElevenLabs TTS -> ffplay
+```
+
+Normal request latency/failures—not a speed test—select `GOOD`, `DEGRADED`, `POOR`, or `OFFLINE`. This changes timeout, retries, context/tool limits, Opus bitrate, chunk size, and VAD boundary. Benchmark Hebrew accuracy before production.
+
+## Configuration and providers
+
+Copy `.env.example` to `.env`. Missing key/model pairs are skipped without a request.
+
+LLM order defaults to Groq, Gemini, OpenRouter, local. The local adapter accepts only a loopback OpenAI-compatible endpoint and never downloads a model. Without it, offline reasoning reports unavailable while memory/tools work.
+
+STT order is AssemblyAI then Deepgram. AssemblyAI uses upload/submit/poll for bounded utterances. Deepgram uses Nova-3 with Hebrew `he`. TTS uses ElevenLabs because its current multilingual models include Hebrew and its Free plan includes TTS credits. Set `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`; otherwise answers remain text-only.
+
+Never commit `.env`. Prompts, audio, transcripts, authorization headers, and keys are not logged by default.
+
+## Voice
+
+Windows capture uses FFmpeg DirectShow. List devices and set the exact name when `default` fails:
+
+```powershell
+ffmpeg -list_devices true -f dshow -i dummy
+```
+
+The pipeline captures 16 kHz mono PCM locally, removes silence, and prefers Ogg Opus only when `libopus`, transport, and STT all support it. MP3/PCM are negotiated fallbacks. Encoded media is not gzip-compressed.
+
+Recordings are bounded and use temporary files rather than whole-recording RAM buffers. Offline encoded chunks enter a bounded checksum-verified spool. Recovery skips relay-acknowledged chunks and deletes completed sessions.
+
+## PHP relay
+
+See [relay/README.md](relay/README.md) and [the protocol](docs/low-bandwidth-audio.md). Deploy with PHP 8.1+, HTTPS, web root `relay/public`, and storage outside the web root.
+
+The relay implements auth, health, rate limiting, session resume, streamed chunk storage, SHA-256, duplicate/conflict detection, status, and finish. Safe default `StoredOnlyForwarder` does not contact STT until a deployment-specific forwarder/key is configured. A null transcript permits direct fallback only when `AGENT_DIRECT_ALLOWED=true` and client STT credentials exist.
+
+## Memory and offline mode
+
+SQLite uses WAL, stays bounded to 5,000 timestamped/deduplicated records, retrieves without loading all rows, and supports deletion. OpenViking/Qdrant are optional.
+
+Offline, local tools, memory, diagnostics and benchmarks work; audio queues; a local LLM runs only if configured on loopback. No model downloads automatically.
+
+## Failure and bandwidth policy
+
+- 401/403: configuration error, no retry, health records it.
+- 429: no immediate retry; numeric `Retry-After` is honored.
+- timeout/connection/5xx: bounded exponential retry, cooldown, fallback.
+- malformed response: fail safely and continue.
+- offline: cloud LLM calls are skipped.
+
+Text requests normalize whitespace, deduplicate adjacent history, keep bounded recent context, and filter tool schemas by relevance. Compression is not used for small text or compressed audio.
+
+## Security
+
+- Relay can hold all provider secrets; production requires HTTPS and agent auth.
+- Upload sizes, content types, IDs and checksums are validated.
+- Server paths are generated/hashed; uploads stay outside web root and never execute.
+- Local file tools enforce allowed roots and a 1 MB limit.
+- No shell tool or automatic replay of non-idempotent tools.
+- Central logging redacts token/key/authorization patterns.
+
+## Tests
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m compileall -q src tests
+```
+
+Commercial APIs are mocked. With PHP CLI, a local relay integration test checks auth and invalid upload handling without external traffic.
+
+## Optional components
+
+LiveKit Agents is not installed: the FFmpeg/VAD path is smaller and completes the one-user MVP. LiveKit remains useful for future WebRTC rooms/telephony, not a parallel voice stack. llmfit is on-demand diagnostics. Needle, OpenViking, Hermes, OpenHuman, Unsloth and Soup are not required at runtime.
+
+## Troubleshooting
+
+- No LLM: configure a key+model or loopback model; run `doctor`.
+- No microphone: install FFmpeg, list DirectShow devices, set `AGENT_MICROPHONE_DEVICE`.
+- No speech output: configure ElevenLabs and put `ffplay` on PATH.
+- Relay failure: verify HTTPS/token/rewrite/storage and `/v1/health`; direct fallback needs a client STT key.
+- 429: wait for cooldown; limits are never evaded.
+
+## Known limitations
+
+- Cloud integrations are mock-tested until keys are supplied; setup/tests make no paid request.
+- Direct AssemblyAI STT is VAD-bounded pre-recorded, not WebSocket streaming.
+- PHP safely stores/finalizes audio; provider forwarding needs deployment-specific server configuration.
+- Voice capture is Windows-only; other systems test initialization/failure behavior.
+- Idle RAM varies by Python/Windows build and should be measured on the target PC.
