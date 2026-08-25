@@ -14,7 +14,10 @@ function envInt(string $name, int $default): int {
     return $value === false ? $default : max(1, (int)$value);
 }
 function bearer(): string {
-    $header = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+    $header = (string)($_SERVER['HTTP_AUTHORIZATION']
+        ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION']
+        ?? getenv('HTTP_AUTHORIZATION')
+        ?: '');
     return str_starts_with($header, 'Bearer ') ? substr($header, 7) : '';
 }
 function validSession(string $id): bool {
@@ -29,6 +32,96 @@ function readJson(): array {
     $data = json_decode($raw, true);
     if (!is_array($data)) respond(400, ['error'=>'invalid_json']);
     return $data;
+}
+
+function requestPath(): string {
+    $path = parse_url((string)($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH) ?: '/';
+    $configured = trim((string)(getenv('RELAY_BASE_PATH') ?: ''));
+    if ($configured !== '') {
+        $base = '/' . trim($configured, '/');
+    } else {
+        $scriptName = str_replace('\\', '/', (string)($_SERVER['SCRIPT_NAME'] ?? ''));
+        $base = rtrim(str_replace('/index.php', '', $scriptName), '/');
+    }
+    if ($base !== '' && $base !== '/') {
+        if ($path === $base) return '/';
+        if (str_starts_with($path, $base . '/')) return substr($path, strlen($base));
+    }
+    return $path;
+}
+
+function streamElevenLabsTts(array $data): never {
+    $text = trim((string)($data['text'] ?? ''));
+    $length = function_exists('mb_strlen') ? mb_strlen($text, 'UTF-8') : strlen($text);
+    if ($text === '' || $length > 5000) respond(400, ['error'=>'invalid_tts_text']);
+    if (!function_exists('curl_init')) respond(503, ['error'=>'curl_unavailable']);
+
+    $apiKey = trim((string)getenv('ELEVENLABS_API_KEY'));
+    $voiceId = trim((string)getenv('ELEVENLABS_VOICE_ID'));
+    $model = trim((string)(getenv('ELEVENLABS_MODEL') ?: 'eleven_v3'));
+    if ($apiKey === '' || $voiceId === '') respond(503, ['error'=>'tts_not_configured']);
+
+    $payload = ['text'=>$text, 'model_id'=>$model];
+    $language = trim((string)($data['language'] ?? ''));
+    if ($language !== '') $payload['language_code'] = $language;
+    $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($json === false) respond(400, ['error'=>'invalid_tts_payload']);
+
+    $url = 'https://api.elevenlabs.io/v1/text-to-speech/' . rawurlencode($voiceId)
+        . '/stream?output_format=mp3_22050_32';
+    $status = 0;
+    $errorBody = '';
+    $audioStarted = false;
+    $ch = curl_init($url);
+    if ($ch === false) respond(503, ['error'=>'curl_unavailable']);
+
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => $json,
+        CURLOPT_HTTPHEADER => [
+            'xi-api-key: ' . $apiKey,
+            'Content-Type: application/json',
+            'Accept: audio/mpeg',
+        ],
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 60,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_RETURNTRANSFER => false,
+        CURLOPT_BUFFERSIZE => 4096,
+        CURLOPT_HEADERFUNCTION => static function ($curl, string $line) use (&$status): int {
+            if (preg_match('#^HTTP/\S+\s+(\d{3})#', trim($line), $match)) $status = (int)$match[1];
+            return strlen($line);
+        },
+        CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (&$status, &$errorBody, &$audioStarted): int {
+            if ($status >= 200 && $status < 300) {
+                if (!$audioStarted) {
+                    while (ob_get_level() > 0) @ob_end_clean();
+                    @ini_set('zlib.output_compression', '0');
+                    http_response_code(200);
+                    header('Content-Type: audio/mpeg');
+                    header('Cache-Control: no-store, no-cache, must-revalidate, no-transform');
+                    header('X-Accel-Buffering: no');
+                    header('X-Content-Type-Options: nosniff');
+                    $audioStarted = true;
+                }
+                echo $chunk;
+                flush();
+            } elseif (strlen($errorBody) < 65536) {
+                $errorBody .= substr($chunk, 0, 65536 - strlen($errorBody));
+            }
+            return strlen($chunk);
+        },
+    ]);
+    if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTPS')) curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+
+    $ok = curl_exec($ch);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+    if ($audioStarted) exit;
+    if ($ok === false) respond(502, ['error'=>'tts_upstream_connection', 'detail'=>$curlError]);
+    $safeStatus = ($status >= 400 && $status <= 599) ? $status : 502;
+    $detail = trim($errorBody);
+    respond($safeStatus, ['error'=>'tts_upstream_error', 'upstream_status'=>$status, 'detail'=>substr($detail, 0, 2048)]);
 }
 
 $token = (string)getenv('RELAY_AGENT_TOKEN');
@@ -64,8 +157,13 @@ fflush($handle); flock($handle, LOCK_UN); fclose($handle);
 if ($count > $limit) respond(429, ['error'=>'rate_limited']);
 
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-$path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+$path = requestPath();
 if ($method === 'GET' && $path === '/v1/health') respond(200, ['status'=>'ok']);
+if ($method === 'GET' && $path === '/v1/tts/health') {
+    $configured = trim((string)getenv('ELEVENLABS_API_KEY')) !== '' && trim((string)getenv('ELEVENLABS_VOICE_ID')) !== '';
+    respond($configured && function_exists('curl_init') ? 200 : 503, ['status'=>$configured ? 'configured' : 'not_configured', 'curl'=>function_exists('curl_init')]);
+}
+if ($method === 'POST' && $path === '/v1/tts/stream') streamElevenLabsTts(readJson());
 
 if ($method === 'POST' && $path === '/v1/audio/sessions') {
     $data = readJson();

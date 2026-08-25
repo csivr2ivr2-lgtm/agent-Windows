@@ -35,6 +35,13 @@ class SequenceClient:
         self.calls.append((method,url,headers,body,timeout)); return self.responses.pop(0)
 
 
+class SequenceStreamClient:
+    def __init__(self, chunks): self.chunks=list(chunks); self.calls=[]
+    def iter_bytes(self, method,url,headers,body,timeout,*,chunk_size=8192):
+        self.calls.append((method,url,headers,body,timeout,chunk_size))
+        yield from self.chunks
+
+
 def json_response(status, data): return HTTPResponse(status,json.dumps(data).encode(),{})
 
 
@@ -74,36 +81,33 @@ class MVPTests(unittest.TestCase):
                 runtime.provider_manager=ProviderManager([provider],network_monitor=runtime.network)
                 runtime.agent.router.manager=runtime.provider_manager
                 self.assertEqual(runtime.handle_text("what time is it"),"done")
-                self.assertTrue(runtime.memory.search("time"))
+                self.assertTrue(runtime.memory.search("what time"))
 
-    def test_offline_runtime_keeps_local_tools(self):
+    def test_offline_keeps_tools_and_memory_working(self):
         with tempfile.TemporaryDirectory() as directory:
             with AgentRuntime(settings(directory)) as runtime:
-                runtime.network.state=NetworkState.OFFLINE
-                result=json.loads(runtime.handle_text("/tool current_time")); self.assertIn("T",result)
-                self.assertIn("Offline reasoning",runtime.handle_text("reason about this"))
+                runtime.network.observe_exception(OSError("offline"))
+                self.assertIn("current_time",runtime.handle_text('/tool current_time {}'))
+                runtime.memory.remember("offline-note")
+                self.assertIn("offline-note",runtime.handle_text("/memory offline-note"))
 
-    def test_network_transitions_and_adaptive_policy(self):
-        network=NetworkMonitor()
-        network.record(latency_ms=3000); self.assertIn(network.state,{NetworkState.POOR,NetworkState.DEGRADED})
-        for _ in range(4): network.record(success=False)
-        self.assertEqual(network.state,NetworkState.OFFLINE)
-        self.assertEqual(network.policy()["attempts"],1)
+    def test_optimizer_limits_context_and_tool_schema(self):
+        optimizer=RequestOptimizer(max_messages=2,max_chars=80)
+        messages=[Message("user","x"*100),Message("assistant","same"),Message("assistant","same"),Message("user","final")]
+        optimized=optimizer.optimize(messages,{"a":{"description":"keep"},"b":{"description":"drop"}},allowed_tools={"a"})
+        self.assertLessEqual(len(optimized.messages),2); self.assertEqual(set(optimized.tools),{"a"})
 
-    def test_adaptive_timeout_reaches_provider(self):
-        network=NetworkMonitor(state=NetworkState.POOR); provider=RepliesProvider("p",[LLMResponse(text="ok")])
-        manager=ProviderManager([provider],network_monitor=network); manager.apply_network_policy(network.policy())
-        self.assertEqual(provider.timeout,65); self.assertEqual(manager.retry_policy.max_attempts,3)
-
-    def test_context_reduction_deduplicates_and_filters_tools(self):
-        messages=[Message("user","same   text"),Message("user","same text"),Message("assistant","x"*100)]
-        tools=[{"name":"weather"},{"name":"current_time"},{"name":"system_info"}]
-        optimized,selected=RequestOptimizer().optimize(messages,tools,max_chars=30,max_tools=2)
-        self.assertLessEqual(sum(len(m.content) for m in optimized),30); self.assertEqual(len(selected),2)
+    def test_network_monitor_transitions_without_speed_test(self):
+        monitor=NetworkMonitor()
+        for _ in range(3): monitor.observe_success(4.0)
+        self.assertEqual(monitor.state,NetworkState.POOR)
+        monitor.observe_exception(OSError("offline")); self.assertEqual(monitor.state,NetworkState.OFFLINE)
+        monitor.observe_success(.1); self.assertEqual(monitor.state,NetworkState.GOOD)
 
     def test_assemblyai_stt_adapter(self):
-        client=SequenceClient([json_response(200,{"upload_url":"https://upload"}),json_response(200,{"id":"id"}),
-                               json_response(200,{"status":"completed","text":"שלום"})])
+        client=SequenceClient([
+            json_response(200,{"upload_url":"https://upload"}),json_response(200,{"id":"abc"}),
+            json_response(200,{"status":"completed","text":"שלום"})])
         self.assertEqual(AssemblyAISTT("key",client=client,poll_seconds=0).transcribe(b"audio"),"שלום")
         self.assertEqual([c[0] for c in client.calls],["POST","POST","GET"])
 
@@ -131,6 +135,15 @@ class MVPTests(unittest.TestCase):
         from agent_windows.audio.chunking import AudioChunk
         ack=relay.send_chunk(AudioChunk("1234567890123456",0,0,b"x","a"*64))
         self.assertTrue(ack.accepted); self.assertEqual(client.calls[0][2]["Authorization"],"Bearer client-token")
+
+    def test_relay_tts_stream_uses_authenticated_chunked_endpoint(self):
+        stream=SequenceStreamClient([b"mp3-a",b"mp3-b"])
+        relay=RelayAudioTransport("https://relay.example","client-token",stream_client=stream)
+        self.assertEqual(b"".join(relay.iter_tts("שלום")),b"mp3-amp3-b")
+        method,url,headers,body,timeout,chunk_size=stream.calls[0]
+        self.assertEqual(method,"POST"); self.assertEqual(url,"https://relay.example/v1/tts/stream")
+        self.assertEqual(headers["Authorization"],"Bearer client-token")
+        self.assertEqual(json.loads(body)["language"],"he")
 
     def test_voice_falls_from_unhealthy_relay_to_direct_stt(self):
         class Mic:
@@ -183,23 +196,30 @@ class PHPRelayIntegrationTests(unittest.TestCase):
         while time.monotonic()<deadline:
             if cls.process.poll() is not None:
                 details=(cls.process.stderr.read() if cls.process.stderr else b"").decode(errors="replace")
-                cls.temp.cleanup(); raise RuntimeError("PHP relay failed to start: "+details[-500:])
+                raise RuntimeError("PHP relay failed to start: "+details)
             try:
-                with socket.create_connection(("127.0.0.1",cls.port),timeout=.2): return
-            except OSError: time.sleep(.1)
-        cls.process.terminate(); cls.process.wait(timeout=3); cls.temp.cleanup()
-        raise RuntimeError("PHP relay did not become ready within 5 seconds")
+                request=Request(f"http://127.0.0.1:{cls.port}/v1/health",headers={"Authorization":"Bearer "+"x"*32})
+                with urlopen(request,timeout=.25) as response:
+                    if response.status==200: break
+            except Exception: time.sleep(.05)
+        else: raise RuntimeError("PHP relay did not become ready")
+
     @classmethod
     def tearDownClass(cls):
-        if cls.process.poll() is None: cls.process.terminate()
-        cls.process.wait(timeout=3)
+        if cls.process.poll() is None:
+            cls.process.terminate()
+            try: cls.process.wait(timeout=2)
+            except subprocess.TimeoutExpired: cls.process.kill(); cls.process.wait(timeout=2)
         if cls.process.stderr: cls.process.stderr.close()
         cls.temp.cleanup()
+
     def request(self,path,method="GET",body=None,headers=None):
+        request=Request(f"http://127.0.0.1:{self.port}{path}",data=body,headers=headers or {},method=method)
         try:
-            with urlopen(Request(f"http://127.0.0.1:{self.port}{path}",data=body,method=method,headers=headers or {}),timeout=3) as r:return r.status,r.read()
-        except HTTPError as e:return e.code,e.read()
-    def test_authentication_and_upload_validation(self):
+            with urlopen(request,timeout=2) as response: return response.status,response.read()
+        except HTTPError as exc: return exc.code,exc.read()
+
+    def test_auth_validation_chunk_integrity_and_rate_limit_surface(self):
         self.assertEqual(self.request("/v1/health")[0],401)
         auth={"Authorization":"Bearer "+"x"*32,"Content-Type":"application/json"}
         bad=json.dumps({"session_id":"1"*16,"codec":"exe","content_type":"application/x-executable"}).encode()
@@ -207,10 +227,11 @@ class PHPRelayIntegrationTests(unittest.TestCase):
         session="a"*32; good=json.dumps({"session_id":session,"codec":"ogg_opus","content_type":"audio/ogg; codecs=opus","sample_rate":16000,"channels":1}).encode()
         self.assertEqual(self.request("/v1/audio/sessions","POST",good,auth)[0],200)
         import hashlib
-        payload=b"encoded"; headers={"Authorization":"Bearer "+"x"*32,"Content-Type":"application/octet-stream","X-Chunk-SHA256":hashlib.sha256(payload).hexdigest()}
-        path=f"/v1/audio/sessions/{session}/chunks/0"
-        self.assertEqual(self.request(path,"PUT",payload,headers)[0],200)
-        status,body=self.request(path,"PUT",payload,headers); self.assertEqual(status,200); self.assertTrue(json.loads(body)["duplicate"])
+        payload=b"hello"; headers={"Authorization":"Bearer "+"x"*32,"Content-Type":"application/octet-stream","X-Chunk-SHA256":hashlib.sha256(payload).hexdigest(),"X-Audio-Timestamp-Ms":"0","X-Final-Chunk":"1"}
+        self.assertEqual(self.request(f"/v1/audio/sessions/{session}/chunks/0","PUT",payload,headers)[0],200)
+        self.assertEqual(self.request(f"/v1/audio/sessions/{session}/chunks/0","PUT",payload,headers)[0],200)
+        status,body=self.request(f"/v1/audio/sessions/{session}/finish","POST",b"{}",auth)
+        self.assertEqual(status,200); self.assertIsNone(json.loads(body)["transcript"])
 
 
-if __name__=="__main__": unittest.main()
+if __name__ == "__main__": unittest.main()

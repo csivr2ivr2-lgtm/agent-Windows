@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +11,9 @@ from pathlib import Path
 from .audio import AudioChunker, EnergyVAD, FFmpegCapabilities, NetworkState, ResilientUploader, ffmpeg_command, profile_for
 from .audio.transport import UploadInterrupted
 from .errors import ProviderConnectionError, ProviderError
+
+
+logger = logging.getLogger(__name__)
 
 
 class MicrophoneUnavailable(RuntimeError): pass
@@ -103,10 +107,45 @@ class VoiceService:
             return self.stt.transcribe(data, content_type=profile.content_type, language="he")
 
     def speak(self, text: str) -> None:
-        if not self.tts or not self.tts.is_available(): return
-        audio = self.tts.synthesize(text, language="he")
         player = shutil.which("ffplay")
-        if not player: return
+        if not player:
+            return
+
+        # Prefer relay streaming: playback starts as soon as the first MP3 bytes arrive,
+        # instead of waiting for the entire ElevenLabs response to download.
+        if self.relay and self.relay.is_available() and hasattr(self.relay, "iter_tts"):
+            process = None
+            streamed = False
+            try:
+                process = subprocess.Popen(
+                    [player, "-nodisp", "-autoexit", "-loglevel", "error", "-i", "pipe:0"],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                for chunk in self.relay.iter_tts(text, language="he"):
+                    if not chunk:
+                        continue
+                    streamed = True
+                    if process.stdin is None:
+                        break
+                    process.stdin.write(chunk)
+                    process.stdin.flush()
+                if process.stdin is not None:
+                    process.stdin.close()
+                process.wait(timeout=30)
+                if streamed:
+                    return
+            except (ProviderError, OSError, subprocess.SubprocessError) as exc:
+                logger.warning("Relay TTS streaming failed: %s", exc)
+            finally:
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=2)
+            if streamed:
+                return
+
+        if not self.tts or not self.tts.is_available():
+            return
+        audio = self.tts.synthesize(text, language="he")
         with tempfile.TemporaryDirectory() as directory:
             audio_path = Path(directory) / "speech.mp3"
             audio_path.write_bytes(audio)
