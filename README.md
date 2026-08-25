@@ -6,7 +6,7 @@ Lightweight, provider-agnostic foundation for a personal Windows AI agent. The t
 
 `voice/text -> STT -> orchestrator -> memory -> LLM router -> tool -> response -> TTS -> memory`
 
-The first milestone implements the text-path contracts, ordered LLM fallback, tool execution, and a zero-dependency in-memory backend. Voice and external providers are adapters added in later milestones.
+The current core implements the text-path contracts, real Groq/Gemini/OpenRouter adapters, provider health and fallback, tool execution, and a zero-dependency in-memory backend. Voice remains a later adapter.
 
 ## Architectural decisions
 
@@ -38,9 +38,37 @@ Licences must be reviewed again before distributing a build that embeds or modif
 - `SpeechToText` and `TextToSpeech`: raw audio adapters.
 - `MemoryStore`: search and remember.
 - `Tool`: JSON-schema declaration and invocation.
-- `LLMRouter`: ordered fallback only on explicit provider failures; no quota evasion.
+- `ProviderManager`: bounded retry, health state, cooldown and ordered fallback.
+- `LLMRouter`: stable facade used by the orchestrator.
 
-Provider order is configured rather than hard-coded: Groq, Gemini, OpenRouter, then a viable local OpenAI-compatible endpoint. Every provider adapter must translate HTTP 429 into `ProviderRateLimited`, use bounded timeouts, and expose a health check. Retries must honor official limits and `Retry-After`.
+Provider order is configured rather than hard-coded: Groq, Gemini, OpenRouter, then a viable local OpenAI-compatible endpoint. The adapters use Python's standard-library HTTP client, so this milestone adds no runtime dependency.
+
+Failure policy:
+
+- HTTP 401/403: authentication failure, no retry, long cooldown, then fallback.
+- HTTP 429: no immediate retry; honor numeric `Retry-After` when present, then fallback.
+- Timeout, connection error, or HTTP 5xx: bounded exponential retry, transient cooldown after exhaustion, then fallback.
+- Other non-2xx or malformed JSON: bad response, no retry, then fallback.
+- Providers without both a key and model are skipped without a network request.
+
+Cooldown is per provider and kept in memory. It prevents hammering a failed service; it does not rotate accounts or bypass limits. API keys are passed only in provider-specific headers and must come from local environment configuration.
+
+## Provider adapters
+
+```python
+from agent_windows.provider_manager import ProviderManager, RetryPolicy
+from agent_windows.providers import GeminiProvider, GroqProvider, OpenRouterProvider
+from agent_windows.router import LLMRouter
+
+manager = ProviderManager([
+    GroqProvider(api_key="...", model="..."),
+    GeminiProvider(api_key="...", model="..."),
+    OpenRouterProvider(api_key="...", model="..."),
+], retry_policy=RetryPolicy(max_attempts=2))
+router = LLMRouter(manager)
+```
+
+The example contains placeholders only. Do not hard-code credentials in application code.
 
 ## Safety model for Windows tools
 
@@ -62,7 +90,7 @@ No API key is needed for the core tests. Copy `.env.example` to `.env` only when
 ## Milestones
 
 1. Core contracts, fallback router, memory, tool registry, tests. **Implemented.**
-2. Groq/Gemini/OpenRouter adapters with mocked HTTP tests, timeouts, cooldowns, and health checks.
+2. Groq/Gemini/OpenRouter adapters with mocked HTTP tests, timeouts, cooldowns, retries, health state, and fallback. **Implemented.**
 3. Persistent local SQLite memory; benchmark OpenViking and hosted vector backends separately.
 4. Safe Windows tool pack with risk classes, confirmation, audit log, and dry-run.
 5. LiveKit voice path; select STT/TTS only after checking current Hebrew quality, latency, and free-tier terms.
