@@ -42,6 +42,13 @@ class FakeProvider:
 
 
 class ProviderManagerTests(unittest.TestCase):
+    def test_poor_network_prefers_local_provider(self):
+        network = type("Network", (), {"state": type("State", (), {"value": "POOR"})(), "record": lambda *a, **k: None})()
+        cloud = FakeProvider("cloud", [LLMResponse(text="cloud")])
+        local = FakeProvider("local", [LLMResponse(text="local")])
+        manager = ProviderManager([cloud, local], network_monitor=network)
+        self.assertEqual(manager.complete([], []).text, "local")
+        self.assertEqual(cloud.calls, 0)
     def make_manager(self, providers, clock, attempts=2):
         return ProviderManager(
             providers,

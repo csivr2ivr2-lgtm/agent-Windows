@@ -15,6 +15,25 @@ from .errors import ProviderConnectionError, ProviderError
 class MicrophoneUnavailable(RuntimeError): pass
 
 
+def _audio_metadata(profile) -> dict:
+    return {
+        "codec": profile.codec,
+        "content_type": profile.content_type,
+        "sample_rate": profile.sample_rate,
+        "channels": profile.channels,
+        "bitrate_bps": profile.bitrate_bps,
+    }
+
+
+def _spool_file(spool, encoded: Path, session_id: str, profile) -> None:
+    with encoded.open("rb") as stream:
+        chunks = AudioChunker(
+            64 * 1024, session_id=session_id, chunk_duration_ms=profile.chunk_ms
+        ).iter_stream(stream)
+        for chunk in chunks:
+            spool.put(chunk, session_metadata=_audio_metadata(profile))
+
+
 class FFmpegMicrophone:
     def __init__(self, device="default", *, ffmpeg="ffmpeg", max_seconds=30, start_timeout=8):
         self.device, self.ffmpeg, self.max_seconds, self.start_timeout = device, ffmpeg, max_seconds, start_timeout
@@ -38,8 +57,11 @@ class FFmpegMicrophone:
                     if not speech_seen and time.monotonic() - started_at > self.start_timeout: raise MicrophoneUnavailable("no speech detected")
         finally:
             process.terminate()
-            try: process.wait(timeout=2)
-            except subprocess.TimeoutExpired: process.kill()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
         if not speech_seen or target.stat().st_size == 0: raise MicrophoneUnavailable("no microphone audio captured")
 
 
@@ -65,9 +87,7 @@ class VoiceService:
             if result.returncode: raise RuntimeError("FFmpeg audio encoding failed")
             session_id = uuid.uuid4().hex
             if state is NetworkState.OFFLINE:
-                with encoded.open("rb") as stream:
-                    metadata={"codec":profile.codec,"content_type":profile.content_type,"sample_rate":profile.sample_rate,"channels":profile.channels,"bitrate_bps":profile.bitrate_bps}
-                    for chunk in AudioChunker(64*1024,session_id=session_id,chunk_duration_ms=profile.chunk_ms).iter_stream(stream): self.spool.put(chunk,session_metadata=metadata)
+                _spool_file(self.spool, encoded, session_id, profile)
                 raise ProviderConnectionError("offline: utterance queued locally")
             if self.relay and self.relay.health():
                 try:
@@ -76,9 +96,7 @@ class VoiceService:
                         result, _ = ResilientUploader(self.relay).upload(chunks, metadata=profile.__dict__)
                     if result.get("transcript") is not None: return result["transcript"]
                 except (ProviderError, UploadInterrupted, ConnectionError, TimeoutError):
-                    metadata={"codec":profile.codec,"content_type":profile.content_type,"sample_rate":profile.sample_rate,"channels":profile.channels,"bitrate_bps":profile.bitrate_bps}
-                    with encoded.open("rb") as stream:
-                        for chunk in AudioChunker(64*1024,session_id=session_id,chunk_duration_ms=profile.chunk_ms).iter_stream(stream): self.spool.put(chunk,session_metadata=metadata)
+                    _spool_file(self.spool, encoded, session_id, profile)
             if not self.direct_allowed:
                 raise ProviderConnectionError("relay unavailable and direct STT is disabled")
             data = encoded.read_bytes()

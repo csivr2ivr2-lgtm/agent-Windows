@@ -73,6 +73,14 @@ class HardeningTests(unittest.TestCase):
             self.assertFalse(RelayAudioTransport(url, "token").is_available(), url)
         self.assertTrue(RelayAudioTransport("https://relay.test", "token").is_available())
 
+    def test_relay_rejects_malformed_protocol_responses(self):
+        class Client:
+            def request(self, *args):
+                return HTTPResponse(200, b"[]", {})
+        relay = RelayAudioTransport("https://relay.test", "token", client=Client())
+        with self.assertRaises(ProviderBadResponse):
+            relay.open("a" * 16, {})
+
     def test_registry_rejects_duplicate_tool_names(self):
         tool = build_windows_tools((Path.cwd(),))[0]
         with self.assertRaises(ValueError):
@@ -122,6 +130,8 @@ class HardeningTests(unittest.TestCase):
             self.assertEqual(list(spool.iter_session("session"))[0].payload, payload)
             conflict = AudioChunk("session", 0, 0, b"other", hashlib.sha256(b"other").hexdigest(), True)
             with self.assertRaises(ValueError): spool.put(conflict)
+            second = AudioChunk("session", 1, 1, b"next", hashlib.sha256(b"next").hexdigest(), True)
+            with self.assertRaises(ValueError): spool.put(second, session_metadata={"codec": "mp3"})
             spool._session_dir("session").joinpath("000000000000.audio").write_bytes(b"bad")
             with self.assertRaises(ValueError): list(spool.iter_session("session"))
             spool.delete_session("session"); self.assertEqual(spool.sessions(), [])
@@ -140,6 +150,7 @@ class HardeningTests(unittest.TestCase):
         value = redact("Authorization: Bearer topsecret token=abc api_key: xyz password=q")
         for secret in ("topsecret", "abc", "xyz", "q"):
             self.assertNotIn(secret, value)
+        self.assertEqual(redact("password=hunter2"), "password=[REDACTED]")
 
     def test_benchmark_is_local_and_reports_expected_metrics(self):
         report = run_local_benchmark()

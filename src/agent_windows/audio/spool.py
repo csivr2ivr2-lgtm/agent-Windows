@@ -24,10 +24,14 @@ class OfflineAudioSpool:
         directory = self._session_dir(chunk.session_id)
         directory.mkdir(parents=True, exist_ok=True)
         if session_metadata is not None:
-            self._atomic_write(
-                directory / "session.json",
-                json.dumps({"session_id": chunk.session_id, **session_metadata}, separators=(",", ":")).encode(),
-            )
+            session_path = directory / "session.json"
+            session_content = json.dumps(
+                {"session_id": chunk.session_id, **session_metadata}, separators=(",", ":")
+            ).encode()
+            if session_path.exists() and session_path.read_bytes() != session_content:
+                raise ValueError("offline audio session metadata conflict")
+            if not session_path.exists():
+                self._atomic_write(session_path, session_content)
         stem = f"{chunk.sequence:012d}"
         payload_path = directory / f"{stem}.audio"
         metadata_path = directory / f"{stem}.json"

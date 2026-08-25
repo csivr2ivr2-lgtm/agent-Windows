@@ -6,7 +6,10 @@ import re
 
 _AUTHORIZATION = re.compile(r"(?i)\bauthorization\s*[:=]\s*[^\r\n]+")
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
-_SECRET = re.compile(r"(?i)\b(api[_-]?key|token|secret)(\s*[:=]\s*)([^\s,;]+)")
+_SECRET = re.compile(
+    r"(?i)\b(api[_-]?key|token|secret|client[_-]?secret|password|passphrase)"
+    r"(\s*[:=]\s*)([^\s,;]+)"
+)
 
 
 def redact(value: object) -> str:

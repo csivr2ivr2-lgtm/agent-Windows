@@ -65,10 +65,11 @@ class SQLiteMemoryStore:
         terms = [word for word in query.split() if len(word) > 2][:6]
         if not terms:
             return []
-        where = " OR ".join("text LIKE ?" for _ in terms)
+        where = " OR ".join("text LIKE ? ESCAPE '\\'" for _ in terms)
+        escaped = [term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") for term in terms]
         with self._connect() as db:
             rows = db.execute(f"SELECT text FROM memories WHERE {where} ORDER BY created DESC LIMIT ?",
-                              (*[f"%{term}%" for term in terms], limit)).fetchall()
+                              (*[f"%{term}%" for term in escaped], max(0, limit))).fetchall()
         return [row[0] for row in rows]
 
     def delete(self, memory_id: int | None = None) -> int:

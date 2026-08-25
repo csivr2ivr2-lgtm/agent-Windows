@@ -67,16 +67,16 @@ class ProviderManager:
             rate_limit_cooldown=self.retry_policy.rate_limit_cooldown,
             auth_cooldown=self.retry_policy.auth_cooldown,
         )
-        providers = self.providers
-        if self.network_monitor and self.network_monitor.state.value == "POOR":
-            providers = tuple(sorted(providers, key=lambda provider: provider.name != "local"))
-        for provider in providers:
+        for provider in self.providers:
             if hasattr(provider, "timeout"):
                 provider.timeout = float(policy.get("timeout", provider.timeout))
 
     def complete(self, messages: Sequence[Message], tools: Sequence[Mapping[str, Any]]) -> LLMResponse:
         failures = []
-        for provider in self.providers:
+        providers = self.providers
+        if self.network_monitor and self.network_monitor.state.value == "POOR":
+            providers = tuple(sorted(providers, key=lambda provider: provider.name != "local"))
+        for provider in providers:
             if self.network_monitor and self.network_monitor.state.value == "OFFLINE" and provider.name != "local":
                 failures.append(f"{provider.name}: offline")
                 continue

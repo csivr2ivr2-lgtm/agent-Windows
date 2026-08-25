@@ -4,7 +4,7 @@ import json
 from urllib.parse import quote, urlsplit
 
 from .audio import AudioChunk, AudioTransport, ChunkAck
-from .errors import ProviderError
+from .errors import ProviderBadResponse, ProviderError
 from .speech import BinaryHTTPClient, UrllibBinaryClient, _check
 
 
@@ -22,6 +22,16 @@ class RelayAudioTransport(AudioTransport):
     def _headers(self, content_type="application/json"):
         return {"Authorization": f"Bearer {self.token}", "Content-Type": content_type}
 
+    @staticmethod
+    def _json(response, operation: str) -> dict:
+        try:
+            data = response.json()
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ProviderBadResponse(f"relay {operation} response is not valid JSON") from exc
+        if not isinstance(data, dict):
+            raise ProviderBadResponse(f"relay {operation} response must be an object")
+        return data
+
     def health(self) -> bool:
         if not self.is_available(): return False
         try:
@@ -33,8 +43,12 @@ class RelayAudioTransport(AudioTransport):
         body = json.dumps({"session_id": session_id, "resume": True, **metadata}).encode()
         response = self.client.request("POST", self.base_url + "/v1/audio/sessions", self._headers(), body, self.timeout)
         _check(response, "relay")
-        data = response.json()
-        self.received_sequences[session_id] = {int(value) for value in data.get("received_sequences", [])}
+        data = self._json(response, "session")
+        try:
+            received = {int(value) for value in data.get("received_sequences", [])}
+        except (TypeError, ValueError) as exc:
+            raise ProviderBadResponse("relay session response has invalid sequences") from exc
+        self.received_sequences[session_id] = received
 
     def send_chunk(self, chunk: AudioChunk) -> ChunkAck:
         url = f"{self.base_url}/v1/audio/sessions/{quote(chunk.session_id, safe='')}/chunks/{chunk.sequence}"
@@ -44,11 +58,14 @@ class RelayAudioTransport(AudioTransport):
         }
         response = self.client.request("PUT", url, headers, chunk.payload, self.timeout)
         _check(response, "relay")
-        data = response.json()
-        return ChunkAck(data["session_id"], int(data["sequence"]), bool(data.get("accepted", True)), bool(data.get("duplicate", False)))
+        data = self._json(response, "chunk")
+        try:
+            return ChunkAck(data["session_id"], int(data["sequence"]), bool(data.get("accepted", True)), bool(data.get("duplicate", False)))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProviderBadResponse("relay chunk response is malformed") from exc
 
     def finish(self, session_id: str) -> dict:
         url = f"{self.base_url}/v1/audio/sessions/{quote(session_id, safe='')}/finish"
         response = self.client.request("POST", url, self._headers(), b"{}", self.timeout)
         _check(response, "relay")
-        return response.json()
+        return self._json(response, "finish")

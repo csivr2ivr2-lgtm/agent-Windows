@@ -17,9 +17,14 @@ def total_memory_bytes() -> int | None:
                 _fields_ = [("dwLength", ctypes.c_ulong),("dwMemoryLoad",ctypes.c_ulong),("ullTotalPhys",ctypes.c_ulonglong),
                             ("ullAvailPhys",ctypes.c_ulonglong),("ullTotalPageFile",ctypes.c_ulonglong),("ullAvailPageFile",ctypes.c_ulonglong),
                             ("ullTotalVirtual",ctypes.c_ulonglong),("ullAvailVirtual",ctypes.c_ulonglong),("sullAvailExtendedVirtual",ctypes.c_ulonglong)]
-            value=MEMORYSTATUSEX(); value.dwLength=ctypes.sizeof(value); ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(value)); return value.ullTotalPhys
+            value = MEMORYSTATUSEX()
+            value.dwLength = ctypes.sizeof(value)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(value)):
+                return None
+            return value.ullTotalPhys
         return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except Exception: return None
+    except (AttributeError, OSError, ValueError):
+        return None
 
 
 def collect(runtime) -> dict:
@@ -44,5 +49,10 @@ def collect(runtime) -> dict:
 def run_llmfit() -> str:
     executable = shutil.which("llmfit")
     if not executable: return "llmfit is not installed; no model was downloaded."
-    result = subprocess.run([executable,"recommend","--json"],capture_output=True,text=True,timeout=30,check=False)
+    try:
+        result = subprocess.run([executable,"recommend","--json"],capture_output=True,text=True,timeout=30,check=False)
+    except subprocess.TimeoutExpired:
+        return "llmfit timed out after 30 seconds."
+    except OSError as exc:
+        return f"llmfit could not start: {exc}"
     return result.stdout if result.returncode == 0 else "llmfit failed: " + result.stderr[:300]
