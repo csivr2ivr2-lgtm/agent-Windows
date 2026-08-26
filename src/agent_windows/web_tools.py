@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any, Mapping
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
+from .safe_http import SafeHTTPError, request_bytes
+from .security import (
+    SecurityValidationError,
+    validate_external_http_url,
+    validate_service_base_url,
+)
 from .windows_tools import FunctionTool
 
 _MAX_RESPONSE = 8 * 1024 * 1024
@@ -16,28 +20,38 @@ class WebIntegrationError(RuntimeError):
 
 
 class JSONTransport:
-    def post(self, url: str, payload: Mapping[str, Any], *, headers: Mapping[str, str] | None = None, timeout: float = 20.0):
+    def post(
+        self,
+        url: str,
+        payload: Mapping[str, Any],
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: float = 20.0,
+    ):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         if len(body) > 1024 * 1024:
             raise WebIntegrationError("web tool request exceeds 1 MB")
-        req = Request(
-            url,
-            data=body,
-            headers={"Content-Type": "application/json", "Accept": "application/json", **dict(headers or {})},
-            method="POST",
-        )
+        request_headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            **dict(headers or {}),
+        }
         try:
-            with urlopen(req, timeout=timeout) as response:
-                raw = response.read(_MAX_RESPONSE + 1)
-        except HTTPError as exc:
-            detail = exc.read(4096).decode("utf-8", errors="replace")
-            raise WebIntegrationError(f"web integration HTTP {exc.code}: {detail[:500]}") from exc
-        except (URLError, OSError, TimeoutError) as exc:
-            raise WebIntegrationError(f"web integration connection failed: {exc}") from exc
-        if len(raw) > _MAX_RESPONSE:
-            raise WebIntegrationError("web integration response exceeds 8 MB")
+            response = request_bytes(
+                url,
+                method="POST",
+                headers=request_headers,
+                body=body,
+                timeout=timeout,
+                max_response_bytes=_MAX_RESPONSE,
+            )
+        except SafeHTTPError as exc:
+            raise WebIntegrationError(str(exc)) from exc
+        if not 200 <= response.status < 300:
+            # Never surface the response body: services may echo URLs, prompts or credentials.
+            raise WebIntegrationError(f"web integration HTTP {response.status}")
         try:
-            return json.loads(raw)
+            return json.loads(response.body)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise WebIntegrationError("web integration returned malformed JSON") from exc
 
@@ -52,7 +66,11 @@ class WigoloAdapter:
     name = "wigolo"
 
     def __post_init__(self):
-        self.base_url = self.base_url.rstrip("/")
+        if self.base_url:
+            try:
+                self.base_url = validate_service_base_url(self.base_url)
+            except SecurityValidationError as exc:
+                raise WebIntegrationError(f"unsafe Wigolo base URL: {exc}") from exc
         self.transport = self.transport or JSONTransport()
 
     def is_configured(self) -> bool:
@@ -65,15 +83,35 @@ class WigoloAdapter:
         )
 
     def search(self, query: str, *, max_results: int = 5):
-        return self._call("search", {"query": query, "max_results": max(1, min(20, int(max_results)))})
+        return self._call(
+            "search",
+            {"query": query, "max_results": max(1, min(20, int(max_results)))},
+        )
 
     def fetch(self, url: str, *, max_content_chars: int = 30000):
-        return self._call("fetch", {"url": url, "max_content_chars": max(1000, min(100000, int(max_content_chars)))})
+        try:
+            target = validate_external_http_url(url)
+        except SecurityValidationError as exc:
+            raise WebIntegrationError(f"unsafe fetch target: {exc}") from exc
+        return self._call(
+            "fetch",
+            {
+                "url": target,
+                "max_content_chars": max(1000, min(100000, int(max_content_chars))),
+            },
+        )
 
     def research(self, question: str, *, depth: str = "standard", max_sources: int = 12):
         if depth not in {"quick", "standard", "comprehensive"}:
             raise ValueError("depth must be quick, standard, or comprehensive")
-        return self._call("research", {"question": question, "depth": depth, "max_sources": max(1, min(50, int(max_sources)))})
+        return self._call(
+            "research",
+            {
+                "question": question,
+                "depth": depth,
+                "max_sources": max(1, min(50, int(max_sources))),
+            },
+        )
 
 
 @dataclass
@@ -87,7 +125,11 @@ class FirecrawlAdapter:
 
     def __post_init__(self):
         self.api_key = self.api_key.strip()
-        self.base_url = self.base_url.rstrip("/")
+        if self.base_url:
+            try:
+                self.base_url = validate_service_base_url(self.base_url)
+            except SecurityValidationError as exc:
+                raise WebIntegrationError(f"unsafe Firecrawl base URL: {exc}") from exc
         self.transport = self.transport or JSONTransport()
 
     def is_configured(self) -> bool:
@@ -116,9 +158,13 @@ class FirecrawlAdapter:
 
     def fetch(self, url: str, *, max_content_chars: int = 30000):
         self._require()
+        try:
+            target = validate_external_http_url(url)
+        except SecurityValidationError as exc:
+            raise WebIntegrationError(f"unsafe fetch target: {exc}") from exc
         result = self.transport.post(
             f"{self.base_url}/v2/scrape",
-            {"url": url, "formats": ["markdown"]},
+            {"url": target, "formats": ["markdown"]},
             headers=self._headers,
             timeout=self.timeout,
         )
@@ -127,7 +173,9 @@ class FirecrawlAdapter:
             if isinstance(data, dict) and isinstance(data.get("markdown"), str):
                 copy = dict(result)
                 copy_data = dict(data)
-                copy_data["markdown"] = copy_data["markdown"][: max(1000, min(100000, int(max_content_chars)))]
+                copy_data["markdown"] = copy_data["markdown"][
+                    : max(1000, min(100000, int(max_content_chars)))
+                ]
                 copy["data"] = copy_data
                 return copy
         return result
@@ -173,8 +221,14 @@ class WebRouter:
 
     def status(self) -> dict[str, dict[str, Any]]:
         return {
-            "wigolo": {"configured": self.wigolo.is_configured(), "base_url": self.wigolo.base_url},
-            "firecrawl": {"configured": self.firecrawl.is_configured(), "base_url": self.firecrawl.base_url},
+            "wigolo": {
+                "configured": self.wigolo.is_configured(),
+                "base_url": self.wigolo.base_url,
+            },
+            "firecrawl": {
+                "configured": self.firecrawl.is_configured(),
+                "base_url": self.firecrawl.base_url,
+            },
         }
 
 
@@ -183,7 +237,9 @@ def build_web_tools(router: WebRouter) -> list[FunctionTool]:
         return router.search(str(args["query"]), max_results=int(args.get("max_results", 5)))
 
     def fetch(args):
-        return router.fetch(str(args["url"]), max_content_chars=int(args.get("max_content_chars", 30000)))
+        return router.fetch(
+            str(args["url"]), max_content_chars=int(args.get("max_content_chars", 30000))
+        )
 
     def research(args):
         return router.research(
@@ -196,21 +252,46 @@ def build_web_tools(router: WebRouter) -> list[FunctionTool]:
         FunctionTool(
             "web_search",
             "Search the live web through local Wigolo first, then Firecrawl fallback",
-            {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}}, "required": ["query"]},
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
             search,
             risk="read_only",
         ),
         FunctionTool(
             "web_fetch",
             "Fetch a URL as structured clean web content",
-            {"type": "object", "properties": {"url": {"type": "string"}, "max_content_chars": {"type": "integer"}}, "required": ["url"]},
+            {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "max_content_chars": {"type": "integer"},
+                },
+                "required": ["url"],
+            },
             fetch,
             risk="read_only",
         ),
         FunctionTool(
             "web_research",
             "Collect multi-source web evidence for a research question",
-            {"type": "object", "properties": {"question": {"type": "string"}, "depth": {"type": "string", "enum": ["quick", "standard", "comprehensive"]}, "max_sources": {"type": "integer"}}, "required": ["question"]},
+            {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "depth": {
+                        "type": "string",
+                        "enum": ["quick", "standard", "comprehensive"],
+                    },
+                    "max_sources": {"type": "integer"},
+                },
+                "required": ["question"],
+            },
             research,
             risk="read_only",
         ),
