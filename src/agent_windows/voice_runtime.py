@@ -185,7 +185,7 @@ class VoiceService:
             except subprocess.TimeoutExpired:
                 pass
 
-    def speak(self, text: str, *, cancel_event=None) -> None:
+    def speak(self, text: str, *, cancel_event=None, on_audio_start=None) -> None:
         player = shutil.which("ffplay")
         if not player:
             return
@@ -206,6 +206,7 @@ class VoiceService:
                 )
                 with self._playback_lock:
                     self._playback_process = process
+                audio_started = False
                 for chunk in self.relay.iter_tts(text, language="he"):
                     if cancelled():
                         process.kill()
@@ -213,6 +214,9 @@ class VoiceService:
                     if not chunk:
                         continue
                     streamed = True
+                    if not audio_started and on_audio_start is not None:
+                        audio_started = True
+                        on_audio_start()
                     if process.stdin is None:
                         break
                     process.stdin.write(chunk)
@@ -248,6 +252,8 @@ class VoiceService:
             )
             with self._playback_lock:
                 self._playback_process = process
+            if on_audio_start is not None:
+                on_audio_start()
             try:
                 while process.poll() is None:
                     if cancelled():
@@ -262,7 +268,7 @@ class VoiceService:
                     if self._playback_process is process:
                         self._playback_process = None
 
-    def speak_chunks(self, chunks, *, cancel_event=None) -> None:
+    def speak_chunks(self, chunks, *, cancel_event=None, on_audio_start=None) -> None:
         buffer = []
         size = 0
         for chunk in chunks:
@@ -275,7 +281,7 @@ class VoiceService:
             size += len(chunk)
             text = "".join(buffer)
             if size >= 80 and (text.rstrip().endswith((".", "!", "?", ":", ";", "\n")) or size >= 180):
-                self.speak(text.strip(), cancel_event=cancel_event)
+                self.speak(text.strip(), cancel_event=cancel_event, on_audio_start=on_audio_start)
                 buffer.clear(); size = 0
         if buffer and not (cancel_event is not None and cancel_event.is_set()):
-            self.speak("".join(buffer).strip(), cancel_event=cancel_event)
+            self.speak("".join(buffer).strip(), cancel_event=cancel_event, on_audio_start=on_audio_start)
