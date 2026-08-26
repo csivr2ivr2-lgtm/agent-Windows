@@ -8,8 +8,6 @@ $ServiceName = 'AgentWindowsAI'
 
 $ServiceRoot = Join-Path $env:ProgramData 'AgentWindowsAI'
 $RuntimeRoot = Join-Path $ServiceRoot 'python-runtime'
-$ServiceVenv = Join-Path $ServiceRoot '.venv'
-$ServicePython = Join-Path $ServiceVenv 'Scripts\python.exe'
 $ServiceEnv = Join-Path $ServiceRoot '.env'
 $ServiceData = Join-Path $ServiceRoot 'data'
 
@@ -80,6 +78,14 @@ try {
         }
     }
 
+    # The previous implementation hosted pythonservice.exe inside a venv.
+    # It is no longer used for the Windows service. Remove it so a stale
+    # host executable cannot be registered accidentally.
+    $OldServiceVenv = Join-Path $ServiceRoot '.venv'
+    if (Test-Path $OldServiceVenv) {
+        Remove-Item -Path $OldServiceVenv -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     if (-not (Test-Path (Join-Path $RuntimeRoot 'python.exe'))) {
         $BasePython = (& $UserPython -c "import sys; print(sys.base_prefix)").Trim()
         if (-not (Test-Path (Join-Path $BasePython 'python.exe'))) {
@@ -100,19 +106,22 @@ try {
         throw "Machine Python runtime is missing: $MachinePython"
     }
 
-    if (-not (Test-Path $ServicePython)) {
-        Write-Host 'Creating service virtual environment...'
-        & $MachinePython -m venv $ServiceVenv
-        if ($LASTEXITCODE -ne 0) { throw 'Creating service virtual environment failed.' }
+    # pywin32's pythonservice.exe is an embedded Python host, not the normal
+    # venv launcher. Keep it next to python311.dll in the machine runtime.
+    # This avoids the well-known virtualenv/pythonservice.exe startup failure
+    # where SCM times out before the service can connect.
+    $runtimePrefix = (& $MachinePython -c "import sys; print(sys.prefix)").Trim()
+    if ($runtimePrefix -ne $RuntimeRoot) {
+        throw "Copied Python runtime resolved unexpected prefix: '$runtimePrefix' (expected '$RuntimeRoot')."
     }
 
-    Write-Host 'Installing service dependencies...'
-    & $ServicePython -m pip install --disable-pip-version-check "pywin32==312"
-    if ($LASTEXITCODE -ne 0) { throw 'Installing pywin32 into service runtime failed.' }
+    Write-Host 'Installing service dependencies into machine runtime...'
+    & $MachinePython -m pip install --disable-pip-version-check --upgrade "pywin32==312"
+    if ($LASTEXITCODE -ne 0) { throw 'Installing pywin32 into machine runtime failed.' }
 
-    Write-Host 'Installing current Agent Windows build into service runtime...'
-    & $ServicePython -m pip install --disable-pip-version-check --force-reinstall --no-deps $Root
-    if ($LASTEXITCODE -ne 0) { throw 'Installing Agent Windows into service runtime failed.' }
+    Write-Host 'Installing current Agent Windows build into machine runtime...'
+    & $MachinePython -m pip install --disable-pip-version-check --force-reinstall --no-deps $Root
+    if ($LASTEXITCODE -ne 0) { throw 'Installing Agent Windows into machine runtime failed.' }
 
     Copy-Item -Path $EnvFile -Destination $ServiceEnv -Force
 
@@ -131,7 +140,7 @@ try {
     Set-ServiceRootAcl -Path $ServiceRoot
 
     Write-Host 'Installing Windows service from machine runtime...'
-    & $ServicePython -m agent_windows.windows_service --startup auto install
+    & $MachinePython -m agent_windows.windows_service --startup auto install
     if ($LASTEXITCODE -ne 0) { throw 'Windows service installation failed.' }
 
     $pythonClassKey = "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\$ServiceName\PythonClass"
@@ -145,8 +154,9 @@ try {
     }
 
     $serviceConfig = & sc.exe qc $ServiceName
-    if (($serviceConfig -join "`n") -notmatch [regex]::Escape($ServiceRoot)) {
-        throw "Service executable was not registered under ProgramData."
+    $expectedServiceExe = Join-Path $RuntimeRoot 'pythonservice.exe'
+    if (($serviceConfig -join "`n") -notmatch [regex]::Escape($expectedServiceExe)) {
+        throw "Service executable was not registered next to python311.dll: $expectedServiceExe"
     }
 
     Start-Service -Name $ServiceName -ErrorAction Stop
