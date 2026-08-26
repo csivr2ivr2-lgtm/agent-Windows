@@ -19,9 +19,9 @@ function Write-Step([string]$Text) {
 function Invoke-Checked {
     param(
         [Parameter(Mandatory=$true)][string]$FilePath,
-        [Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments
+        [string[]]$ArgumentList = @()
     )
-    & $FilePath @Arguments
+    & $FilePath @ArgumentList
     if ($LASTEXITCODE -ne 0) { throw "$FilePath failed with exit code $LASTEXITCODE" }
 }
 
@@ -102,7 +102,7 @@ try {
 
     Write-Step 'Updating repository'
     if (Get-Command git -ErrorAction SilentlyContinue) {
-        Invoke-Checked git -C $Root pull --ff-only
+        Invoke-Checked -FilePath 'git' -ArgumentList @('-C', $Root, 'pull', '--ff-only')
     }
     else { Write-Warning 'git not found; continuing with the current checkout.' }
 
@@ -111,7 +111,7 @@ try {
     if (-not (Test-Path $Python)) { throw "Python virtual environment missing after setup: $Python" }
 
     Write-Step 'Installing realtime and Needle integrations'
-    Invoke-Checked $Python -m pip install -e "$Root[realtime,needle]"
+    Invoke-Checked -FilePath $Python -ArgumentList @('-m', 'pip', 'install', '-e', "$Root[realtime,needle]")
 
     Write-Step 'Installing Windows-Use fallback'
     & $Python -m pip install 'windows-use==0.8.1'
