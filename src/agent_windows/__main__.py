@@ -12,6 +12,7 @@ from .final_checks import build_final_report, write_final_report
 from .logging_utils import configure_logging
 from .model_fit import model_fit_report
 from .runtime import AgentRuntime
+from .realtime import LocalRealtimeSession
 from .benchmark import run_local_benchmark
 
 
@@ -91,8 +92,15 @@ def _run(args, runtime) -> int:
         return 0 if all(item["status"] in {"OK", "UNCONFIGURED"} for item in report) else 2
     if args.command=="voice":
         try:
-            text=runtime.voice.listen(); print("You:",text); answer=runtime.handle_text(text); print("Agent:",answer); runtime.voice.speak(answer); return 0
-        except Exception as exc: print(f"Voice unavailable: {exc}",file=sys.stderr); return 2
+            print("Voice conversation active. Press Ctrl+C to exit.")
+            LocalRealtimeSession(runtime).run(lambda: True)
+            return 0
+        except KeyboardInterrupt:
+            print()
+            return 0
+        except Exception as exc:
+            print(f"Voice unavailable: {exc}", file=sys.stderr)
+            return 2
     print("agent-Windows chat. /tool current_time, /memory QUERY, or exit")
     while True:
         try: text=input("You> ").strip()

@@ -32,6 +32,18 @@ class DummyRuntime:
         return None
 
 
+class DummyRealtimeSession:
+    instances = []
+
+    def __init__(self, runtime):
+        self.runtime = runtime
+        self.ran = False
+        self.__class__.instances.append(self)
+
+    def run(self, keep_running):
+        self.ran = bool(keep_running())
+
+
 class CLIDiagnosticsTests(unittest.TestCase):
     def test_status_outputs_json(self):
         with patch("agent_windows.__main__.AgentRuntime", DummyRuntime), \
@@ -55,15 +67,20 @@ class CLIDiagnosticsTests(unittest.TestCase):
              patch("sys.stdout", new_callable=io.StringIO) as output:
             self.assertEqual(main(["chat"]), 0)
             self.assertIn("answer:hello", output.getvalue())
+        DummyRealtimeSession.instances.clear()
         with patch("agent_windows.__main__.AgentRuntime", DummyRuntime), \
+             patch("agent_windows.__main__.LocalRealtimeSession", DummyRealtimeSession), \
              patch("sys.stdout", new_callable=io.StringIO) as output:
             self.assertEqual(main(["voice"]), 0)
-            self.assertIn("Agent: answer:hello", output.getvalue())
+            self.assertIn("Voice conversation active", output.getvalue())
+            self.assertTrue(DummyRealtimeSession.instances[-1].ran)
 
     def test_voice_failure_is_safe(self):
         runtime = DummyRuntime(None)
-        runtime.voice.listen = Mock(side_effect=RuntimeError("device unavailable"))
+        session = Mock()
+        session.run.side_effect = RuntimeError("device unavailable")
         with patch("agent_windows.__main__.AgentRuntime", return_value=runtime), \
+             patch("agent_windows.__main__.LocalRealtimeSession", return_value=session), \
              patch("sys.stderr", new_callable=io.StringIO) as error:
             self.assertEqual(main(["voice"]), 2)
             self.assertIn("Voice unavailable", error.getvalue())
