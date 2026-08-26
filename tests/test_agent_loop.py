@@ -1,7 +1,7 @@
 import unittest
 
 from agent_windows.agent_loop import AgentBudget, AgentLoop, AgentState
-from agent_windows.contracts import LLMResponse, ToolCall
+from agent_windows.contracts import LLMResponse, Message, ToolCall
 from agent_windows.memory import InMemoryStore
 from agent_windows.policy import PolicyEngine, RiskLevel
 from agent_windows.router import LLMRouter
@@ -76,6 +76,29 @@ class AgentLoopTests(unittest.TestCase):
         ).run("do it", budget=AgentBudget(max_steps=1, max_tool_calls=1, max_replans=0))
         self.assertEqual(result.state, AgentState.FAILED)
         self.assertIn("budget", result.text.lower())
+
+    def test_initial_messages_include_session_history_before_current_user(self):
+        loop = AgentLoop(
+            LLMRouter([FakeProvider([])]),
+            InMemoryStore(),
+            ToolRegistry([]),
+            system_prompt="system",
+        )
+        messages = loop._initial_messages(
+            "רק במשפט אחד",
+            history=(
+                Message("user", "תסביר לי מה זה MCP"),
+                Message("assistant", "MCP הוא פרוטוקול שמחבר מודלים לכלים."),
+            ),
+        )
+        self.assertEqual(
+            [(message.role, message.content) for message in messages[-3:]],
+            [
+                ("user", "תסביר לי מה זה MCP"),
+                ("assistant", "MCP הוא פרוטוקול שמחבר מודלים לכלים."),
+                ("user", "רק במשפט אחד"),
+            ],
+        )
 
     def test_medium_risk_requires_matching_confirmation(self):
         tool = Tool()

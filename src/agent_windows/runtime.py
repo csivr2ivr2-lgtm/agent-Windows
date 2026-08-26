@@ -137,9 +137,9 @@ class AgentRuntime:
         except ProviderUnavailable:
             return "אין כרגע מודל זמין. כלי המערכת והזיכרון עדיין עובדים דרך ‎/tool ו־‎/memory."
 
-    def stream_text(self, text: str, *, cancel_event=None):
+    def stream_text(self, text: str, *, cancel_event=None, history=None):
         self.provider_manager.apply_network_policy(self.network.policy())
-        yield from self.agent.loop.stream(text, cancel_event=cancel_event)
+        yield from self.agent.loop.stream(text, cancel_event=cancel_event, history=history)
 
     def recover_audio(self) -> int:
         if not self.relay or not self.relay.health(): return 0

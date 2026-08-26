@@ -92,7 +92,9 @@ class AgentLoop:
             return value
         return AgentBudget(max_steps=max(1, steps), max_tool_calls=max(0, calls), max_replans=value.max_replans)
 
-    def _initial_messages(self, user_text: str) -> list[Message]:
+    def _initial_messages(
+        self, user_text: str, history: Sequence[Message] | None = None
+    ) -> list[Message]:
         messages = [Message("system", self.system_prompt)]
         context = self.memory.search(user_text)
         if context:
@@ -111,6 +113,12 @@ class AgentLoop:
                 skill_context = ""
             if skill_context:
                 messages.append(Message("system", "Relevant reusable skills:\n" + skill_context))
+        if history:
+            messages.extend(
+                Message(message.role, message.content)
+                for message in history
+                if message.role in {"user", "assistant"} and message.content.strip()
+            )
         messages.append(Message("user", user_text))
         return messages
 
@@ -206,9 +214,10 @@ class AgentLoop:
         *,
         budget: AgentBudget | None = None,
         cancel_event=None,
+        history: Sequence[Message] | None = None,
     ) -> Iterator[str]:
         budget = self._effective_budget(budget)
-        messages = self._initial_messages(user_text)
+        messages = self._initial_messages(user_text, history)
 
         steps = tool_calls = replans = 0
         cancelled = lambda: bool(cancel_event is not None and cancel_event.is_set())

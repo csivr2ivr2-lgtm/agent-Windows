@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Callable
 
 from .audio import EnergyVAD
+from .contracts import Message
 from .errors import ProviderConnectionError
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,13 @@ class LatencyMetrics:
 
 
 @dataclass
+class ConversationTurn:
+    user: str
+    assistant: str = ""
+    interrupted: bool = False
+
+
+@dataclass
 class CancellationScope:
     event: threading.Event = field(default_factory=threading.Event)
 
@@ -102,6 +110,10 @@ class LocalRealtimeSession:
         self._response_lock = threading.Lock()
         self._response_scope: CancellationScope | None = None
         self._response_thread: threading.Thread | None = None
+        self._active_turn: ConversationTurn | None = None
+        self._history_lock = threading.Lock()
+        self._turns: list[ConversationTurn] = []
+        self._max_history_turns = 8
         self._barge_frames_seen = 0
         self._barge_accepted = False
         self._session_error: BaseException | None = None
@@ -116,6 +128,41 @@ class LocalRealtimeSession:
             thread = self._response_thread
         return bool(thread and thread.is_alive())
 
+    def _history_snapshot(self) -> tuple[Message, ...]:
+        with self._history_lock:
+            turns = list(self._turns[-self._max_history_turns :])
+        messages: list[Message] = []
+        for turn in turns:
+            if turn.user.strip():
+                messages.append(Message("user", turn.user.strip()))
+            assistant = turn.assistant.strip()
+            if assistant:
+                if turn.interrupted:
+                    assistant += "\n[התגובה נקטעה על ידי המשתמש.]"
+                messages.append(Message("assistant", assistant))
+        return tuple(messages)
+
+    def _begin_turn(self, text: str) -> tuple[ConversationTurn, tuple[Message, ...]]:
+        history = self._history_snapshot()
+        turn = ConversationTurn(user=text.strip())
+        with self._history_lock:
+            self._turns.append(turn)
+            if len(self._turns) > self._max_history_turns:
+                self._turns = self._turns[-self._max_history_turns :]
+        return turn, history
+
+    def _append_assistant_chunk(self, turn: ConversationTurn, chunk: str) -> None:
+        if not chunk:
+            return
+        with self._history_lock:
+            turn.assistant += chunk
+
+    def _mark_turn_interrupted(self, turn: ConversationTurn | None) -> None:
+        if turn is None:
+            return
+        with self._history_lock:
+            turn.interrupted = True
+
     def _cancel_response_for_barge_in(self) -> None:
         if not self._response_active() or self._barge_accepted:
             return
@@ -124,6 +171,8 @@ class LocalRealtimeSession:
         self._set_state(RealtimeState.INTERRUPTING)
         with self._response_lock:
             scope = self._response_scope
+            turn = self._active_turn
+        self._mark_turn_interrupted(turn)
         if scope:
             scope.cancel()
         self.runtime.voice.cancel_playback()
@@ -137,9 +186,11 @@ class LocalRealtimeSession:
             return
         if self._response_active():
             self._cancel_response_for_barge_in()
+        turn, history = self._begin_turn(text)
         scope = CancellationScope()
         with self._response_lock:
             self._response_scope = scope
+            self._active_turn = turn
         self._barge_accepted = False
         self.metrics.mark("transcript_ready")
 
@@ -150,9 +201,12 @@ class LocalRealtimeSession:
 
             def chunks():
                 nonlocal first_token
-                for chunk in self.runtime.stream_text(text, cancel_event=scope.event):
+                for chunk in self.runtime.stream_text(
+                    text, cancel_event=scope.event, history=history
+                ):
                     if scope.cancelled:
                         return
+                    self._append_assistant_chunk(turn, chunk)
                     if first_token and chunk:
                         first_token = False
                         self.metrics.mark("first_llm_token")
@@ -174,11 +228,14 @@ class LocalRealtimeSession:
                 logger.exception("Realtime response failed")
                 self._set_state(RealtimeState.ERROR)
             finally:
+                if scope.cancelled:
+                    self._mark_turn_interrupted(turn)
                 self.metrics.log()
                 with self._response_lock:
                     if self._response_scope is scope:
                         self._response_scope = None
                         self._response_thread = None
+                        self._active_turn = None
                 if not scope.cancelled and self.state is not RealtimeState.ERROR:
                     self._set_state(RealtimeState.LISTENING)
 

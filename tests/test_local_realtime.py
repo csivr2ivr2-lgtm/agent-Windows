@@ -87,7 +87,9 @@ class FakeRuntime:
         mic = FakeMic(keep, empty=empty_mic)
         self.streaming_stt = FakeSTTManager(stt_session)
         self.voice = FakeVoice(mic)
-    def stream_text(self, _text, *, cancel_event=None):
+        self.stream_calls = []
+    def stream_text(self, text, *, cancel_event=None, history=None):
+        self.stream_calls.append((text, tuple(history or ())))
         yield "x" * 100
 
 
@@ -121,6 +123,28 @@ class LocalRealtimeTests(unittest.TestCase):
         self.assertGreaterEqual(session.metrics.milliseconds()["barge_in_to_playback_stopped"], 0)
         self.assertIn(RealtimeState.INTERRUPTING, states)
         self.assertIn(RealtimeState.USER_SPEAKING, states)
+        session._cancel_response_for_barge_in()
+
+    def test_barge_in_next_turn_receives_interrupted_session_history(self):
+        keep = [True]
+        runtime = FakeRuntime(keep)
+        session = LocalRealtimeSession(runtime)
+        session._start_response("תסביר לי מה זה MCP")
+        self.assertTrue(runtime.voice.started.wait(1))
+        session._cancel_response_for_barge_in()
+
+        session._start_response("רק במשפט אחד")
+        deadline = time.monotonic() + 1
+        while len(runtime.stream_calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+        self.assertGreaterEqual(len(runtime.stream_calls), 2)
+        _, history = runtime.stream_calls[1]
+        self.assertEqual(history[0].role, "user")
+        self.assertEqual(history[0].content, "תסביר לי מה זה MCP")
+        self.assertEqual(history[1].role, "assistant")
+        self.assertIn("התגובה נקטעה", history[1].content)
+
         session._cancel_response_for_barge_in()
 
     def test_response_blank_error_and_metrics(self):
