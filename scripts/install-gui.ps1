@@ -47,6 +47,9 @@ Push-Location $Root
 try {
     Stop-AgentCompanions
 
+    # Stable user-level project path for Command Prompt: cd /d "%AI-AHARON%"
+    [Environment]::SetEnvironmentVariable('AI-AHARON', $Root, 'User')
+
     # The Windows service starts automatically. The voice client opens manually,
     # so the microphone never activates just because the user signed in.
     $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -73,6 +76,7 @@ try {
     Write-Host ''
     Write-Host 'ai aharon installed.' -ForegroundColor Green
     Write-Host "Desktop shortcut: $shortcutPath"
+    Write-Host "Project path variable: AI-AHARON=$Root"
     Write-Host 'Opening ai aharon starts a continuous voice call immediately.'
     Write-Host 'The Windows service still starts automatically with Windows.'
     Write-Host 'No push-to-talk button is used.'

@@ -14,6 +14,30 @@ from .errors import ProviderConnectionError
 logger = logging.getLogger(__name__)
 
 
+_FOLLOW_UP_MARKERS = (
+    "משפט אחד", "בקצרה", "קצר", "רק", "תמשיך", "תסכם", "תמצת",
+    "עצור", "פחות", "יותר", "אותו", "אותה", "זה", "זאת", "שוב",
+)
+
+
+def _contextualize_followup(text: str, history: tuple[Message, ...]) -> str:
+    normalized = " ".join(text.casefold().split())
+    words = normalized.split()
+    is_followup = (
+        bool(history)
+        and bool(words)
+        and len(words) <= 8
+        and any(marker in normalized for marker in _FOLLOW_UP_MARKERS)
+    )
+    if not is_followup:
+        return text
+    return (
+        "זו הוראת המשך קצרה לשיחה הקודמת. התייחס לנושא האחרון שהמשתמש שאל עליו "
+        "ולתגובה האחרונה של העוזר; אל תעבור להסביר מי אתה או נושא חדש אלא אם נתבקשת במפורש. "
+        f"הוראת המשתמש עכשיו: {text}"
+    )
+
+
 class RealtimeState(str, Enum):
     CONNECTING = "connecting"
     LISTENING = "listening"
@@ -187,6 +211,7 @@ class LocalRealtimeSession:
         if self._response_active():
             self._cancel_response_for_barge_in()
         turn, history = self._begin_turn(text)
+        prompt_text = _contextualize_followup(text, history)
         scope = CancellationScope()
         with self._response_lock:
             self._response_scope = scope
@@ -202,7 +227,7 @@ class LocalRealtimeSession:
             def chunks():
                 nonlocal first_token
                 for chunk in self.runtime.stream_text(
-                    text, cancel_event=scope.event, history=history
+                    prompt_text, cancel_event=scope.event, history=history
                 ):
                     if scope.cancelled:
                         return

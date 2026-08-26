@@ -36,7 +36,6 @@ HEBREW_LABELS = {
     "connected": "שירות מחובר",
     "disconnected": "שירות לא זמין",
     "voice_only": "שיחה קולית רציפה",
-    "hint": "דבר כרגיל. אין צורך ללחוץ על כפתור.",
     "end": "סיום שיחה",
 }
 
@@ -143,7 +142,6 @@ class AgentDesktopApp:
         ttk.Label(card, textvariable=self.status_var, font=("Segoe UI", 26, "bold"), style="State.TLabel").pack(pady=(2, 6))
         self.timer_var = tk.StringVar(value="00:00")
         ttk.Label(card, textvariable=self.timer_var, font=("Segoe UI", 12), style="Meta.TLabel").pack(pady=(0, 18))
-        ttk.Label(card, text=HEBREW_LABELS["hint"], justify="center", font=("Segoe UI", 11), style="Meta.TLabel").pack(fill="x", pady=(6, 20))
 
         tk.Button(
             card,
