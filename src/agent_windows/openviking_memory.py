@@ -4,9 +4,10 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+
+from .safe_http import SafeHTTPError, request_bytes
+from .security import SecurityValidationError, validate_service_base_url
 
 logger = logging.getLogger(__name__)
 _MAX_RESPONSE = 4 * 1024 * 1024
@@ -30,7 +31,11 @@ class OpenVikingClient:
     timeout: float = 8.0
 
     def __post_init__(self):
-        self.base_url = self.base_url.rstrip("/")
+        if self.base_url:
+            try:
+                self.base_url = validate_service_base_url(self.base_url)
+            except SecurityValidationError as exc:
+                raise OpenVikingError(f"unsafe OpenViking base URL: {exc}") from exc
         self.api_key = self.api_key.strip()
         self.session_id = self.session_id.strip() or "ai-aharon"
         self._session_ready = False
@@ -49,24 +54,22 @@ class OpenVikingClient:
         if not self.is_configured():
             raise OpenVikingError("OpenViking is not configured")
         body = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
-        request = Request(
-            self.base_url + path,
-            data=body,
-            headers=self._headers(),
-            method="POST",
-        )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                raw = response.read(_MAX_RESPONSE + 1)
-        except HTTPError as exc:
-            detail = exc.read(2048).decode("utf-8", errors="replace")
-            raise OpenVikingError(f"OpenViking HTTP {exc.code}: {detail[:300]}") from exc
-        except (URLError, OSError, TimeoutError) as exc:
+            response = request_bytes(
+                self.base_url + path,
+                method="POST",
+                headers=self._headers(),
+                body=body,
+                timeout=self.timeout,
+                max_response_bytes=_MAX_RESPONSE,
+            )
+        except SafeHTTPError as exc:
             raise OpenVikingError(f"OpenViking connection failed: {exc}") from exc
-        if len(raw) > _MAX_RESPONSE:
-            raise OpenVikingError("OpenViking response exceeds 4 MB")
+        if not 200 <= response.status < 300:
+            # Do not expose or log response bodies; a server may echo memory content or secrets.
+            raise OpenVikingError(f"OpenViking HTTP {response.status}")
         try:
-            return _unwrap(json.loads(raw))
+            return _unwrap(json.loads(response.body))
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise OpenVikingError("OpenViking returned malformed JSON") from exc
 
