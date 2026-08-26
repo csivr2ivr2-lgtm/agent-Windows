@@ -46,8 +46,19 @@ class UFOExecutor:
 
     name = "ufo"
 
+    def _runtime_python(self) -> str:
+        if self.workdir:
+            candidate = self.workdir / ".venv" / "Scripts" / "python.exe"
+            if candidate.is_file():
+                return str(candidate)
+        return self.python_executable
+
     def is_available(self) -> bool:
-        return _is_windows() and _module_available("ufo")
+        if not _is_windows():
+            return False
+        if _module_available("ufo"):
+            return True
+        return bool(self.workdir and (self.workdir / "ufo").is_dir() and Path(self._runtime_python()).is_file())
 
     def execute(self, task: str) -> dict[str, Any]:
         if not self.is_available():
@@ -57,7 +68,7 @@ class UFOExecutor:
             raise ValueError("computer task cannot be empty")
         task_name = _TASK_NAME.sub("-", request.casefold()).strip("-")[:48] or "ai-aharon-task"
         command = [
-            self.python_executable,
+            self._runtime_python(),
             "-m",
             "ufo",
             "--task",
