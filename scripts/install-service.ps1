@@ -50,7 +50,7 @@ function Set-ServiceRootAcl {
 
 function Stop-SessionCompanion {
     Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like '*agent_windows.session_agent*' } |
+        Where-Object { $_.CommandLine -like '*agent_windows.session_agent*' -or $_.CommandLine -like '*agent_windows.desktop_gui*' } |
         ForEach-Object {
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         }
@@ -178,12 +178,22 @@ try {
     & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/15000/""/0 | Out-Null
 
     $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    $runCommand = '"{0}" -m agent_windows.session_agent --env "{1}"' -f $UserPythonw, $EnvFile
+    $runCommand = '"{0}" -m agent_windows.desktop_gui --env "{1}" --minimized' -f $UserPythonw, $EnvFile
     New-Item -Path $runKey -Force | Out-Null
     New-ItemProperty -Path $runKey -Name 'AgentWindowsSession' -Value $runCommand -PropertyType String -Force | Out-Null
 
+    # Create a desktop shortcut for the graphical client.
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $shortcutPath = Join-Path $desktop 'Agent Windows AI.lnk'
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = $UserPythonw
+    $shortcut.Arguments = '-m agent_windows.desktop_gui --env "{0}"' -f $EnvFile
+    $shortcut.WorkingDirectory = $Root
+    $shortcut.Save()
+
     Start-Process -FilePath $UserPythonw `
-        -ArgumentList @('-m','agent_windows.session_agent','--env',$EnvFile) `
+        -ArgumentList @('-m','agent_windows.desktop_gui','--env',$EnvFile) `
         -WorkingDirectory $Root
 
     Start-Sleep -Seconds 2
@@ -192,8 +202,8 @@ try {
     Write-Host 'Agent Windows service installed and running.' -ForegroundColor Green
     Write-Host "Service: $ServiceName (Automatic / Running)"
     Write-Host "Service runtime: $ServiceRoot"
-    Write-Host 'Voice companion: starts automatically when you sign in.'
-    Write-Host 'Press Ctrl+Alt+Space, then speak.'
+    Write-Host 'Graphical companion: starts automatically when you sign in.'
+    Write-Host 'Use the desktop shortcut, the microphone button, or Ctrl+Alt+Space.'
     Write-Host "Log: $(Join-Path $OldData 'session-agent.log')"
 }
 finally {
