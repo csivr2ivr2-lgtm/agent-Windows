@@ -11,6 +11,7 @@ from .errors import (
     ProviderConnectionError,
     ProviderError,
     ProviderRateLimited,
+    ProviderPermissionError,
     ProviderServerError,
     ProviderTimeout,
     ProviderUnavailable,
@@ -124,8 +125,8 @@ class ProviderManager:
                             yield chunk
                 else:
                     response = self._attempt(provider, messages, tools)
-                    if response.content:
-                        yield response.content
+                    if response.text:
+                        yield response.text
                 state.healthy = True
                 state.consecutive_failures = 0
                 state.cooldown_until = 0.0
@@ -137,17 +138,22 @@ class ProviderManager:
         if failures:
             raise ProviderUnavailable("All LLM providers failed: " + "; ".join(failures))
 
-    def _attempt(self, provider, messages, tools):
+    def _attempt(self, provider, messages, tools) -> LLMResponse:
         policy = self.retry_policy
+        last_error: ProviderError | None = None
         for attempt in range(1, max(1, policy.max_attempts) + 1):
             try:
                 return provider.complete(messages, tools)
-            except (ProviderAuthenticationError, ProviderRateLimited):
+            except (ProviderAuthenticationError, ProviderPermissionError, ProviderRateLimited):
                 raise
-            except (ProviderTimeout, ProviderConnectionError, ProviderServerError):
+            except (ProviderTimeout, ProviderConnectionError, ProviderServerError) as exc:
+                last_error = exc
                 if attempt >= max(1, policy.max_attempts):
                     raise
-                self._sleep(min(policy.max_delay, policy.base_delay * (2 ** (attempt - 1))))
+                delay = min(policy.base_delay * (2 ** (attempt - 1)), policy.max_delay)
+                self._sleep(max(0.0, delay))
+        assert last_error is not None
+        raise last_error
 
     def _record_failure(self, state: ProviderHealth, exc: ProviderError) -> None:
         policy = self.retry_policy
@@ -156,7 +162,7 @@ class ProviderManager:
         state.last_error = str(exc)
         if isinstance(exc, ProviderRateLimited):
             cooldown = exc.retry_after if exc.retry_after is not None else policy.rate_limit_cooldown
-        elif isinstance(exc, ProviderAuthenticationError):
+        elif isinstance(exc, (ProviderAuthenticationError, ProviderPermissionError)):
             cooldown = policy.auth_cooldown
         else:
             cooldown = policy.transient_cooldown

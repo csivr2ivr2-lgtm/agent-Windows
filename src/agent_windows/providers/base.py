@@ -8,6 +8,7 @@ from ..errors import (
     ProviderAuthenticationError,
     ProviderBadResponse,
     ProviderRateLimited,
+    ProviderPermissionError,
     ProviderServerError,
 )
 from ..http import HTTPResponse, HTTPTransport, UrllibTransport
@@ -22,8 +23,10 @@ def _retry_after(response: HTTPResponse) -> float | None:
 
 
 def validate_response(response: HTTPResponse, provider: str) -> None:
-    if response.status in (401, 403):
-        raise ProviderAuthenticationError(f"{provider} authentication failed (HTTP {response.status})")
+    if response.status == 401:
+        raise ProviderAuthenticationError(f"{provider} authentication failed (HTTP 401)")
+    if response.status == 403:
+        raise ProviderPermissionError(f"{provider} permission/model access denied (HTTP 403)")
     if response.status == 429:
         raise ProviderRateLimited(
             f"{provider} rate limited the request", retry_after=_retry_after(response)

@@ -15,7 +15,11 @@ class ProviderRateLimited(ProviderError):
 
 
 class ProviderAuthenticationError(ProviderError):
-    """Credentials are absent, invalid, or forbidden (HTTP 401/403)."""
+    """Credentials are absent or invalid (normally HTTP 401)."""
+
+
+class ProviderPermissionError(ProviderAuthenticationError):
+    """Credentials were accepted but access/model permission was denied (HTTP 403)."""
 
 
 class ProviderTimeout(ProviderError):

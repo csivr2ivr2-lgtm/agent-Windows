@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from .audio.encoder import FFmpegCapabilities
+from .provider_checks import check_providers
 
 
 def total_memory_bytes() -> int | None:
@@ -56,3 +57,8 @@ def run_llmfit() -> str:
     except OSError as exc:
         return f"llmfit could not start: {exc}"
     return result.stdout if result.returncode == 0 else "llmfit failed: " + result.stderr[:300]
+
+
+def provider_check_report(runtime) -> list[dict]:
+    """Run a tiny live request against every configured LLM provider without printing secrets."""
+    return [result.as_dict() for result in check_providers(runtime.provider_manager.providers)]
