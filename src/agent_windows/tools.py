@@ -18,7 +18,10 @@ class ToolRegistry:
             for tool in self._tools.values()
         ]
 
-    def invoke(self, name: str, arguments: Mapping[str, Any]) -> Any:
+    def get(self, name: str) -> Tool:
         if name not in self._tools:
             raise KeyError(f"Unknown tool: {name}")
-        return self._tools[name].invoke(arguments)
+        return self._tools[name]
+
+    def invoke(self, name: str, arguments: Mapping[str, Any]) -> Any:
+        return self.get(name).invoke(arguments)
