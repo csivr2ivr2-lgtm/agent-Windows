@@ -185,6 +185,59 @@ class VoiceService:
             except subprocess.TimeoutExpired:
                 pass
 
+    def _play_stream(self, player: str, chunks, *, cancel_event=None, on_audio_start=None) -> bool:
+        """Feed encoded audio chunks to one hidden ffplay process.
+
+        Returns True once at least one audio chunk was written. Cancellation kills
+        playback immediately and leaves no queued audio in the player process.
+        """
+        process = None
+
+        def cancelled() -> bool:
+            return bool(cancel_event is not None and cancel_event.is_set())
+
+        try:
+            process = subprocess.Popen(
+                [player, "-nodisp", "-autoexit", "-loglevel", "error", "-i", "pipe:0"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **hidden_subprocess_kwargs(),
+            )
+            with self._playback_lock:
+                self._playback_process = process
+            streamed = False
+            audio_started = False
+            for chunk in chunks:
+                if cancelled():
+                    process.kill()
+                    break
+                if not chunk:
+                    continue
+                if process.stdin is None:
+                    break
+                streamed = True
+                if not audio_started and on_audio_start is not None:
+                    audio_started = True
+                    on_audio_start()
+                process.stdin.write(chunk)
+                process.stdin.flush()
+            if process.poll() is None and process.stdin is not None:
+                process.stdin.close()
+            if process.poll() is None:
+                process.wait(timeout=30)
+            return streamed
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+            with self._playback_lock:
+                if self._playback_process is process:
+                    self._playback_process = None
+
     def speak(self, text: str, *, cancel_event=None, on_audio_start=None) -> None:
         player = shutil.which("ffplay")
         if not player:
@@ -196,48 +249,32 @@ class VoiceService:
         if cancelled():
             return
         if self.relay and self.relay.is_available() and hasattr(self.relay, "iter_tts"):
-            process = None
-            streamed = False
             try:
-                process = subprocess.Popen(
-                    [player, "-nodisp", "-autoexit", "-loglevel", "error", "-i", "pipe:0"],
-                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    **hidden_subprocess_kwargs(),
-                )
-                with self._playback_lock:
-                    self._playback_process = process
-                audio_started = False
-                for chunk in self.relay.iter_tts(text, language="he"):
-                    if cancelled():
-                        process.kill()
-                        break
-                    if not chunk:
-                        continue
-                    streamed = True
-                    if not audio_started and on_audio_start is not None:
-                        audio_started = True
-                        on_audio_start()
-                    if process.stdin is None:
-                        break
-                    process.stdin.write(chunk)
-                    process.stdin.flush()
-                if process.poll() is None and process.stdin is not None:
-                    process.stdin.close()
-                if process.poll() is None:
-                    process.wait(timeout=30)
-                if streamed or cancelled():
+                if self._play_stream(
+                    player,
+                    self.relay.iter_tts(text, language="he"),
+                    cancel_event=cancel_event,
+                    on_audio_start=on_audio_start,
+                ) or cancelled():
                     return
             except (ProviderError, OSError, subprocess.SubprocessError) as exc:
                 logger.warning("Relay TTS streaming failed: %s", exc)
-            finally:
-                if process is not None and process.poll() is None:
-                    process.kill()
-                    process.wait(timeout=2)
-                with self._playback_lock:
-                    if self._playback_process is process:
-                        self._playback_process = None
 
         if cancelled() or not self.tts or not self.tts.is_available():
+            return
+        if hasattr(self.tts, "iter_audio"):
+            try:
+                if self._play_stream(
+                    player,
+                    self.tts.iter_audio(text, language="he"),
+                    cancel_event=cancel_event,
+                    on_audio_start=on_audio_start,
+                ) or cancelled():
+                    return
+            except (ProviderError, OSError, subprocess.SubprocessError) as exc:
+                logger.warning("Direct TTS streaming failed: %s", exc)
+
+        if cancelled():
             return
         audio = self.tts.synthesize(text, language="he")
         if cancelled():

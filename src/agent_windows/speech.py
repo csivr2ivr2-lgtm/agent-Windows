@@ -4,7 +4,7 @@ import json
 import socket
 import time
 from dataclasses import dataclass
-from typing import Mapping, Protocol
+from typing import Iterator, Mapping, Protocol
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -24,6 +24,26 @@ class UrllibBinaryClient:
                 return HTTPResponse(response.status, _read_limited(response, 32 * 1024 * 1024), dict(response.headers.items()))
         except HTTPError as exc:
             return HTTPResponse(exc.code, _read_limited(exc), dict(exc.headers.items()))
+        except (TimeoutError, socket.timeout) as exc:
+            raise ProviderTimeout(str(exc)) from exc
+        except URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                raise ProviderTimeout(str(exc.reason)) from exc
+            raise ProviderConnectionError(str(exc.reason)) from exc
+        except OSError as exc:
+            raise ProviderConnectionError(str(exc)) from exc
+
+    def iter_request(self, method, url, headers, body, timeout, *, chunk_size=4096) -> Iterator[bytes]:
+        try:
+            with urlopen(Request(url, data=body, headers=dict(headers), method=method), timeout=timeout) as response:
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        return
+                    yield chunk
+        except HTTPError as exc:
+            response = HTTPResponse(exc.code, _read_limited(exc), dict(exc.headers.items()))
+            _check(response, "streaming HTTP")
         except (TimeoutError, socket.timeout) as exc:
             raise ProviderTimeout(str(exc)) from exc
         except URLError as exc:
@@ -109,10 +129,26 @@ class ElevenLabsTTS:
     def __init__(self, api_key: str, voice_id: str, *, model="eleven_v3", client: BinaryHTTPClient | None = None, timeout=45):
         self.api_key, self.voice_id, self.model, self.client, self.timeout = api_key.strip(), voice_id.strip(), model, client or UrllibBinaryClient(), timeout
     def is_available(self): return bool(self.api_key and self.voice_id)
+    def _request_parts(self, text: str, *, streaming: bool) -> tuple[str, dict[str, str], bytes]:
+        suffix = "/stream" if streaming else ""
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}{suffix}?output_format=mp3_22050_32"
+        headers = {"xi-api-key": self.api_key, "Content-Type": "application/json", "Accept": "audio/mpeg"}
+        body = json.dumps({"text": text, "model_id": self.model}).encode()
+        return url, headers, body
+    def iter_audio(self, text: str, *, language: str | None = None) -> Iterator[bytes]:
+        if not self.is_available():
+            raise ProviderAuthenticationError("elevenlabs is not configured")
+        iterator = getattr(self.client, "iter_request", None)
+        if iterator is None:
+            audio = self.synthesize(text, language=language)
+            if audio:
+                yield audio
+            return
+        url, headers, body = self._request_parts(text, streaming=True)
+        yield from iterator("POST", url, headers, body, self.timeout, chunk_size=4096)
     def synthesize(self, text: str, *, language: str | None = None) -> bytes:
         if not self.is_available(): raise ProviderAuthenticationError("elevenlabs is not configured")
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}?output_format=mp3_22050_32"
-        response = self.client.request("POST", url, {"xi-api-key": self.api_key,"Content-Type":"application/json","Accept":"audio/mpeg"},
-                                       json.dumps({"text": text, "model_id": self.model}).encode(), self.timeout)
+        url, headers, body = self._request_parts(text, streaming=False)
+        response = self.client.request("POST", url, headers, body, self.timeout)
         _check(response, self.name)
         return response.body
