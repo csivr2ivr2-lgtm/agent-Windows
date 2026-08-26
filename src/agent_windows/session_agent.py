@@ -28,7 +28,6 @@ def _configure_file_logging(data_dir: Path) -> logging.FileHandler:
     log_path.touch(exist_ok=True)
     handler = logging.FileHandler(log_path, encoding="utf-8", delay=True)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    logging.getLogger().addHandler(handler)
     return handler
 
 
@@ -81,6 +80,7 @@ def main(argv=None) -> int:
     settings = Settings.from_env(env_path)
     configure_logging(settings.log_level)
     file_handler = _configure_file_logging(settings.data_dir)
+    logging.getLogger().addHandler(file_handler)
     try:
         _register_hotkey()
         try:
