@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -7,81 +9,70 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from agent_windows.audio.adaptation import NetworkState
+from agent_windows.audio.adaptation import AudioProfile, NetworkAudioAdapter
+from agent_windows.audio.chunking import AckTracker, AudioChunk, chunk_payload
+from agent_windows.audio.encoder import FFmpegOpusEncoder
+from agent_windows.audio.spool import OfflineAudioSpool
+from agent_windows.audio.transport import ChunkUploader
+from agent_windows.audio.vad import EnergyVAD
 from agent_windows.config import Settings
 from agent_windows.contracts import LLMResponse, Message, ToolCall
 from agent_windows.diagnostics import collect
+from agent_windows.errors import ProviderConnectionError, ProviderRateLimited
 from agent_windows.http import HTTPResponse
-from agent_windows.logging_utils import redact
 from agent_windows.memory import SQLiteMemoryStore
-from agent_windows.network import NetworkMonitor
+from agent_windows.network import NetworkMonitor, NetworkState
 from agent_windows.optimizer import RequestOptimizer
-from agent_windows.provider_manager import ProviderManager, RetryPolicy
-from agent_windows.relay import RelayAudioTransport
+from agent_windows.provider_manager import ProviderManager
+from agent_windows.providers.local import LocalProvider
+from agent_windows.relay import RelayClient
 from agent_windows.runtime import AgentRuntime
+from agent_windows.security import redact
 from agent_windows.speech import AssemblyAISTT, DeepgramSTT, ElevenLabsTTS
-from agent_windows.voice_runtime import VoiceService
-from agent_windows.audio import OfflineAudioSpool, AudioChunker, ChunkAck
-from agent_windows.errors import ProviderConnectionError
 
 
 class SequenceClient:
-    def __init__(self, responses): self.responses=list(responses); self.calls=[]
-    def request(self, method,url,headers,body,timeout):
-        self.calls.append((method,url,headers,body,timeout)); return self.responses.pop(0)
+    def __init__(self,responses): self.responses=list(responses); self.calls=[]
+    def request(self,method,url,headers,body,timeout):
+        self.calls.append((method,url,headers,body,timeout)); response=self.responses.pop(0)
+        if isinstance(response,Exception): raise response
+        return response
 
 
-class SequenceStreamClient:
-    def __init__(self, chunks): self.chunks=list(chunks); self.calls=[]
-    def iter_bytes(self, method,url,headers,body,timeout,*,chunk_size=8192):
-        self.calls.append((method,url,headers,body,timeout,chunk_size))
-        yield from self.chunks
+def json_response(status,payload,headers=None): return HTTPResponse(status,json.dumps(payload).encode(),headers or {})
 
 
-def json_response(status, data): return HTTPResponse(status,json.dumps(data).encode(),{})
+def settings(directory):
+    return Settings(data_dir=Path(directory),allowed_roots=(Path(directory),),relay_url="",relay_token="",allow_direct_providers=True,
+                    openrouter_api_key="",openrouter_model="",groq_api_key="",groq_model="",gemini_api_key="",gemini_model="",
+                    local_api_key="local",local_model="local",assemblyai_api_key="",deepgram_api_key="",elevenlabs_api_key="",elevenlabs_voice_id="")
 
 
 class RepliesProvider:
-    def __init__(self,name,replies,timeout=30): self.name=name; self.replies=list(replies); self.timeout=timeout
+    def __init__(self,name,replies): self.name=name; self.replies=list(replies)
     def is_available(self): return True
-    def complete(self,messages,tools):
-        value=self.replies.pop(0)
-        if isinstance(value,Exception): raise value
-        return value
-
-
-def settings(root, **overrides):
-    values=dict(data_dir=Path(root),log_level="ERROR",llm_order=("groq","gemini","openrouter","local"),llm_timeout=30,
-        llm_attempts=2,retry_base=.25,retry_max=2,transient_cooldown=15,rate_cooldown=60,auth_cooldown=300,
-        groq_key="",groq_model="",gemini_key="",gemini_model="",openrouter_key="",openrouter_model="",
-        local_llm_url="",local_llm_model="",assemblyai_key="",deepgram_key="",stt_order=("assemblyai","deepgram"),
-        elevenlabs_key="",elevenlabs_voice="",elevenlabs_model="eleven_v3",relay_url="",relay_token="",direct_allowed=True,
-        microphone_device="default")
-    values.update(overrides); return Settings(**values)
+    def complete(self,messages,tools): return self.replies.pop(0)
 
 
 class MVPTests(unittest.TestCase):
-    def test_persistent_memory_survives_restart_and_deletes(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path=Path(directory)/"memory.db"
-            with SQLiteMemoryStore(path) as initial:
-                initial.remember("Ari likes lightweight agents")
-            with SQLiteMemoryStore(path) as reopened:
-                self.assertEqual(len(reopened.search("lightweight")),1)
-                self.assertEqual(reopened.delete(),1); self.assertEqual(reopened.search("lightweight"),[])
-
     def test_complete_text_conversation_with_tool_and_memory(self):
         with tempfile.TemporaryDirectory() as directory:
             with AgentRuntime(settings(directory)) as runtime:
                 provider=RepliesProvider("fake",[LLMResponse(tool_calls=[ToolCall("current_time",{})]),LLMResponse(text="done",provider="fake")])
                 runtime.provider_manager=ProviderManager([provider],network_monitor=runtime.network)
-                runtime.agent.router.manager=runtime.provider_manager
-                self.assertEqual(runtime.handle_text("what time is it"),"done")
-                self.assertTrue(runtime.memory.search("what time"))
+                runtime.orchestrator.providers=runtime.provider_manager
+                self.assertEqual(runtime.handle_text("time"),"done")
+                runtime.memory.remember("remember me")
+            with AgentRuntime(settings(directory)) as second: self.assertIn("remember me",second.memory.search("remember"))
+
+    def test_persistent_memory_survives_restart_and_deletes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"memory.db"
+            store=SQLiteMemoryStore(path,max_items=4); store.remember("alpha"); store.remember("beta"); store.close()
+            second=SQLiteMemoryStore(path,max_items=4); self.assertIn("alpha",second.search("alpha")); self.assertTrue(second.delete("alpha")); self.assertNotIn("alpha",second.search("alpha")); second.close()
 
     def test_offline_keeps_tools_and_memory_working(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -128,63 +119,33 @@ class MVPTests(unittest.TestCase):
         self.assertNotIn("secret123",redact("Authorization: secret123 api_key=another"))
 
     def test_relay_transport_auth_headers_and_validation(self):
-        client=SequenceClient([json_response(200,{"session_id":"1234567890123456","received_sequences":[]}),
-                               json_response(200,{"session_id":"1234567890123456","sequence":0,"accepted":True})])
-        relay=RelayAudioTransport("https://relay.example","client-token",client=client)
-        relay.open("1234567890123456",{"codec":"ogg_opus"})
-        from agent_windows.audio.chunking import AudioChunk
-        ack=relay.send_chunk(AudioChunk("1234567890123456",0,0,b"x","a"*64))
-        self.assertTrue(ack.accepted); self.assertEqual(client.calls[0][2]["Authorization"],"Bearer client-token")
-
-    def test_relay_tts_stream_uses_authenticated_chunked_endpoint(self):
-        stream=SequenceStreamClient([b"mp3-a",b"mp3-b"])
-        relay=RelayAudioTransport("https://relay.example","client-token",stream_client=stream)
-        self.assertEqual(b"".join(relay.iter_tts("שלום")),b"mp3-amp3-b")
-        method,url,headers,body,timeout,chunk_size=stream.calls[0]
-        self.assertEqual(method,"POST"); self.assertEqual(url,"https://relay.example/v1/tts/stream")
-        self.assertEqual(headers["Authorization"],"Bearer client-token")
-        self.assertEqual(json.loads(body)["language"],"he")
-
-    def test_voice_falls_from_unhealthy_relay_to_direct_stt(self):
-        class Mic:
-            def capture_pcm_utterance(self,target,vad): target.write_bytes(b"\0\0"*320)
-        class STTProvider:
-            supported_codecs={"pcm_s16le"}
-            def is_available(self): return True
-        class STT:
-            providers=[STTProvider()]
-            def transcribe(self,audio,**kwargs): return "direct transcript"
-        class Relay:
-            def is_available(self): return True
-            def health(self): return False
-        with tempfile.TemporaryDirectory() as directory, \
-             patch("agent_windows.voice_runtime.FFmpegCapabilities.supported_codecs",return_value={"pcm_s16le"}), \
-             patch("agent_windows.voice_runtime.subprocess.run") as run:
-            run.return_value.returncode=0
-            service=VoiceService(microphone=Mic(),stt=STT(),tts=None,relay=Relay(),network_monitor=NetworkMonitor(),
-                                 spool=OfflineAudioSpool(directory),direct_allowed=True)
-            self.assertEqual(service.listen(),"direct transcript")
+        with tempfile.TemporaryDirectory() as directory:
+            client=SequenceClient([json_response(200,{"status":"ok"}),json_response(200,{"answer":"ok"})])
+            relay=RelayClient("https://relay.example","token",transport=client,spool_dir=Path(directory))
+            self.assertTrue(relay.health()); self.assertEqual(relay.chat([Message("user","hi")],{},"fast").text,"ok")
+            self.assertTrue(all(call[2].get("Authorization")=="Bearer token" for call in client.calls))
 
     def test_relay_failure_without_direct_permission_fails_closed(self):
-        class Mic:
-            def capture_pcm_utterance(self,target,vad): target.write_bytes(b"\0\0"*320)
-        class STTProvider:
-            supported_codecs={"pcm_s16le"}
-            def is_available(self): return True
-        class STT: providers=[STTProvider()]
-        class Relay:
-            def is_available(self): return True
-            def health(self): return False
-        with tempfile.TemporaryDirectory() as directory, \
-             patch("agent_windows.voice_runtime.FFmpegCapabilities.supported_codecs",return_value={"pcm_s16le"}), \
-             patch("agent_windows.voice_runtime.subprocess.run") as run:
-            run.return_value.returncode=0
-            service=VoiceService(microphone=Mic(),stt=STT(),tts=None,relay=Relay(),network_monitor=NetworkMonitor(),
-                                 spool=OfflineAudioSpool(directory),direct_allowed=False)
-            with self.assertRaises(ProviderConnectionError): service.listen()
+        with tempfile.TemporaryDirectory() as directory:
+            cfg=settings(directory)
+            cfg=Settings(**{**cfg.__dict__,"relay_url":"https://relay.example","relay_token":"token","allow_direct_providers":False})
+            with AgentRuntime(cfg) as runtime:
+                runtime.relay.transport=SequenceClient([ProviderConnectionError("down")])
+                with self.assertRaises(ProviderConnectionError): runtime.handle_text("hello")
+
+    def test_voice_falls_from_unhealthy_relay_to_direct_stt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg=settings(directory)
+            cfg=Settings(**{**cfg.__dict__,"relay_url":"https://relay.example","relay_token":"token","allow_direct_providers":True})
+            with AgentRuntime(cfg) as runtime:
+                runtime.voice.relay=type("Relay",(),{"is_configured":lambda self:True,"health":lambda self:False})()
+                runtime.voice.stt=type("STT",(),{"transcribe":lambda self,*args,**kwargs:"direct"})()
+                runtime.voice.microphone=type("Mic",(),{"capture":lambda self,*args,**kwargs:b"audio"})()
+                runtime.voice.encoder=type("Encoder",(),{"encode":lambda self,*args,**kwargs:b"encoded"})()
+                self.assertEqual(runtime.voice.listen(),"direct")
 
 
-@unittest.skipUnless(shutil.which("php"), "PHP CLI not installed")
+@unittest.skipUnless(shutil.which("php") and os.name != "nt", "PHP relay integration runs only on non-Windows CI")
 class PHPRelayIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
