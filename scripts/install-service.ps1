@@ -136,9 +136,9 @@ try {
         throw "Copied Python runtime resolved unexpected prefix: '$runtimePrefix' (expected '$RuntimeRoot')."
     }
 
-    Write-Host 'Installing service dependencies into machine runtime...'
-    & $MachinePython -m pip install --disable-pip-version-check --upgrade "pywin32==312"
-    if ($LASTEXITCODE -ne 0) { throw 'Installing pywin32 into machine runtime failed.' }
+    Write-Host 'Installing pinned service dependencies into machine runtime...'
+    & $MachinePython -m pip install --disable-pip-version-check --upgrade "pywin32==312" "websockets==17.0.1"
+    if ($LASTEXITCODE -ne 0) { throw 'Installing pinned service dependencies failed.' }
 
     Write-Host 'Installing current Agent Windows build into machine runtime...'
     & $MachinePython -m pip install --disable-pip-version-check --force-reinstall --no-deps $Root
@@ -198,38 +198,15 @@ try {
 
     & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/15000/""/0 | Out-Null
 
-    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    $runCommand = '"{0}" -m agent_windows.desktop_gui --env "{1}" --minimized' -f $UserPythonw, $EnvFile
-    New-Item -Path $runKey -Force | Out-Null
-    New-ItemProperty -Path $runKey -Name 'AgentWindowsSession' -Value $runCommand -PropertyType String -Force | Out-Null
-
-    # Create a desktop shortcut for the graphical client.
-    $desktop = [Environment]::GetFolderPath('Desktop')
-    $oldShortcutPath = Join-Path $desktop 'Agent Windows AI.lnk'
-    Remove-Item -Path $oldShortcutPath -Force -ErrorAction SilentlyContinue
-    $shortcutPath = Join-Path $desktop 'ai aharon.lnk'
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $UserPythonw
-    $shortcut.Arguments = '-m agent_windows.desktop_gui --env "{0}"' -f $EnvFile
-    $shortcut.WorkingDirectory = $Root
-    $shortcut.IconLocation = "$IconPath,0"
-    $shortcut.Description = 'ai aharon'
-    $shortcut.Save()
-
-    Start-Process -FilePath $UserPythonw `
-        -ArgumentList @('-m','agent_windows.desktop_gui','--env',$EnvFile) `
-        -WorkingDirectory $Root
-
-    Start-Sleep -Seconds 2
+    # User-session audio/UI is installed separately by install-gui.ps1.
+    # The Windows service must never auto-open the microphone or a desktop window.
 
     Write-Host ''
     Write-Host 'Agent Windows service installed and running.' -ForegroundColor Green
     Write-Host "Service: $ServiceName (Automatic / Running)"
     Write-Host "Service runtime: $ServiceRoot"
-    Write-Host 'ai aharon: starts automatically when you sign in.'
-    Write-Host 'Use the desktop shortcut, the microphone button, or Ctrl+Alt+Space.'
-    Write-Host "Log: $(Join-Path $OldData 'session-agent.log')"
+    Write-Host 'User-session GUI/audio was not started by the service installer.'
+    Write-Host 'Run scripts\install-gui.ps1 (the finalizer does this automatically).'
 }
 finally {
     Pop-Location

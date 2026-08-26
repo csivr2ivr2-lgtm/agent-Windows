@@ -17,9 +17,10 @@ class PhoneGuiSmokeTests(unittest.TestCase):
         self.assertNotIn("ScrolledText", build_source)
         self.assertNotIn("Entry(", build_source)
         self.assertNotIn("mic_button", build_source)
-        self.assertIn("while self._call_active.is_set()", loop_source)
-        self.assertIn("self.runtime.voice.listen()", loop_source)
-        self.assertIn("self.runtime.voice.speak(answer)", loop_source)
+        self.assertIn("LocalRealtimeSession", loop_source)
+        self.assertIn("self._realtime_session.run", loop_source)
+        self.assertNotIn("self.runtime.voice.listen()", loop_source)
+        self.assertNotIn("self.runtime.voice.speak(answer)", loop_source)
 
     def test_windows_app_identity_is_set_before_tk_root(self):
         source = inspect.getsource(desktop_gui.main)

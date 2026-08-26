@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
-from ..contracts import LLMResponse, Message, ToolCall
+from ..contracts import LLMResponse, LLMStreamEvent, Message, ToolCall
 from ..errors import (
     ProviderAuthenticationError,
     ProviderBadResponse,
+    ProviderPermissionError,
     ProviderRateLimited,
     ProviderServerError,
 )
-from ..http import HTTPResponse, HTTPTransport, UrllibTransport
+from ..http import HTTPResponse, HTTPStatusError, HTTPTransport, UrllibTransport
 
 
 def _retry_after(response: HTTPResponse) -> float | None:
@@ -22,11 +23,16 @@ def _retry_after(response: HTTPResponse) -> float | None:
 
 
 def validate_response(response: HTTPResponse, provider: str) -> None:
-    if response.status in (401, 403):
-        raise ProviderAuthenticationError(f"{provider} authentication failed (HTTP {response.status})")
+    if response.status == 401:
+        raise ProviderAuthenticationError(f"{provider} authentication failed (HTTP 401)")
+    if response.status == 403:
+        raise ProviderPermissionError(
+            f"{provider} permission/model access denied (HTTP 403)"
+        )
     if response.status == 429:
         raise ProviderRateLimited(
-            f"{provider} rate limited the request", retry_after=_retry_after(response)
+            f"{provider} rate limited the request",
+            retry_after=_retry_after(response),
         )
     if 500 <= response.status <= 599:
         raise ProviderServerError(f"{provider} server error (HTTP {response.status})")
@@ -57,17 +63,32 @@ class OpenAICompatibleProvider:
     def is_available(self) -> bool:
         return bool(self.api_key and self.model)
 
-    def complete(self, messages: Sequence[Message], tools: Sequence[Mapping[str, Any]]) -> LLMResponse:
+    def _payload(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[Mapping[str, Any]],
+        *,
+        stream: bool = False,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
         }
         if tools:
             payload["tools"] = [{"type": "function", "function": tool} for tool in tools]
+        if stream:
+            payload["stream"] = True
+        return payload
+
+    def complete(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[Mapping[str, Any]],
+    ) -> LLMResponse:
         response = self.transport.post_json(
             self.endpoint,
             {"Authorization": f"Bearer {self.api_key}", **self.extra_headers},
-            payload,
+            self._payload(messages, tools),
             self.timeout,
         )
         validate_response(response, self.name)
@@ -85,3 +106,86 @@ class OpenAICompatibleProvider:
             return LLMResponse(message.get("content") or "", calls, self.name)
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ProviderBadResponse(f"{self.name} returned malformed JSON") from exc
+
+    def stream_events(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[Mapping[str, Any]],
+        *,
+        cancel_event=None,
+    ) -> Iterator[LLMStreamEvent]:
+        stream_sse = getattr(self.transport, "stream_sse", None)
+        if stream_sse is None:
+            response = self.complete(messages, tools)
+            if response.text:
+                yield LLMStreamEvent.text_delta(self.name, response.text)
+            for call in response.tool_calls:
+                yield LLMStreamEvent.call(self.name, call)
+            return
+
+        fragments: dict[int, dict[str, str]] = {}
+        try:
+            data_stream = stream_sse(
+                self.endpoint,
+                {"Authorization": f"Bearer {self.api_key}", **self.extra_headers},
+                self._payload(messages, tools, stream=True),
+                self.timeout,
+            )
+            for raw in data_stream:
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                if raw == b"[DONE]":
+                    break
+                try:
+                    data = json.loads(raw)
+                    choices = data.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    text = delta.get("content")
+                    if text:
+                        yield LLMStreamEvent.text_delta(self.name, str(text))
+                    for raw_call in delta.get("tool_calls") or []:
+                        index = int(raw_call.get("index", 0))
+                        state = fragments.setdefault(index, {"name": "", "arguments": ""})
+                        function = raw_call.get("function") or {}
+                        if function.get("name"):
+                            state["name"] += str(function["name"])
+                        if function.get("arguments"):
+                            state["arguments"] += str(function["arguments"])
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise ProviderBadResponse(
+                        f"{self.name} returned malformed streaming JSON"
+                    ) from exc
+        except HTTPStatusError as exc:
+            validate_response(exc.response, self.name)
+            raise AssertionError("unreachable")
+
+        for index in sorted(fragments):
+            fragment = fragments[index]
+            name = fragment["name"].strip()
+            if not name:
+                raise ProviderBadResponse(f"{self.name} streamed a tool call without a name")
+            raw_arguments = fragment["arguments"].strip()
+            try:
+                arguments = json.loads(raw_arguments) if raw_arguments else {}
+            except json.JSONDecodeError as exc:
+                raise ProviderBadResponse(
+                    f"{self.name} streamed malformed tool arguments"
+                ) from exc
+            if not isinstance(arguments, Mapping):
+                raise ProviderBadResponse(
+                    f"{self.name} streamed non-object tool arguments"
+                )
+            yield LLMStreamEvent.call(self.name, ToolCall(name, arguments))
+
+    def stream(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[Mapping[str, Any]],
+        *,
+        cancel_event=None,
+    ) -> Iterator[str]:
+        for event in self.stream_events(messages, tools, cancel_event=cancel_event):
+            if event.kind == "text" and event.text:
+                yield event.text

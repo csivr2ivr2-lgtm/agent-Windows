@@ -69,32 +69,36 @@ if sys.platform.startswith("win"):
                 from .service_api import ServiceBackend
 
                 root = _project_root()
+                previous_cwd = Path.cwd()
                 os.environ.setdefault("AGENT_WINDOWS_HOME", str(root))
                 os.chdir(root)
-                settings = Settings.from_env(root / ".env")
-                configure_logging(settings.log_level)
-                servicemanager.LogInfoMsg("Agent Windows AI service starting")
                 try:
-                    with AgentRuntime(settings) as runtime:
-                        self.backend = ServiceBackend(runtime, settings.data_dir)
-                        worker = threading.Thread(
-                            target=self.backend.serve_forever,
-                            name="agent-windows-service-api",
-                            daemon=True,
+                    settings = Settings.from_env(root / ".env")
+                    configure_logging(settings.log_level)
+                    servicemanager.LogInfoMsg("Agent Windows AI service starting")
+                    try:
+                        with AgentRuntime(settings) as runtime:
+                            self.backend = ServiceBackend(runtime, settings.data_dir)
+                            worker = threading.Thread(
+                                target=self.backend.serve_forever,
+                                name="agent-windows-service-api",
+                                daemon=True,
+                            )
+                            worker.start()
+                            win32event.WaitForSingleObject(
+                                self.stop_event, win32event.INFINITE
+                            )
+                            self.backend.stop()
+                            worker.join(timeout=5)
+                    except Exception:
+                        servicemanager.LogErrorMsg(
+                            "Agent Windows AI service crashed:\n" + _format_current_exception()
                         )
-                        worker.start()
-                        win32event.WaitForSingleObject(
-                            self.stop_event, win32event.INFINITE
-                        )
-                        self.backend.stop()
-                        worker.join(timeout=5)
-                except Exception:
-                    servicemanager.LogErrorMsg(
-                        "Agent Windows AI service crashed:\n" + _format_current_exception()
-                    )
-                    raise
+                        raise
+                    finally:
+                        servicemanager.LogInfoMsg("Agent Windows AI service stopped")
                 finally:
-                    servicemanager.LogInfoMsg("Agent Windows AI service stopped")
+                    os.chdir(previous_cwd)
 
 
 def _format_current_exception() -> str:

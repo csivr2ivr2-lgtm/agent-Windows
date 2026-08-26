@@ -25,6 +25,25 @@ class NetworkMonitor:
             self.state = NetworkState.GOOD
         return self.state
 
+    def observe_success(self, latency_seconds: float) -> NetworkState:
+        """Record one successful network operation measured in seconds."""
+        latency_ms = max(0.0, float(latency_seconds)) * 1000.0
+        self.latency_ms = latency_ms
+        self.failure_score = 0.0
+        if latency_ms > 2500:
+            self.state = NetworkState.POOR
+        elif latency_ms > 900:
+            self.state = NetworkState.DEGRADED
+        else:
+            self.state = NetworkState.GOOD
+        return self.state
+
+    def observe_exception(self, _exc: BaseException) -> NetworkState:
+        """Treat a failed network operation as an immediate offline signal."""
+        self.failure_score = 1.0
+        self.state = NetworkState.OFFLINE
+        return self.state
+
     def policy(self) -> dict[str, int | float]:
         return {
             NetworkState.GOOD: {"timeout": 30, "attempts": 2, "context_chars": 12000, "tools": 20},
@@ -32,4 +51,3 @@ class NetworkMonitor:
             NetworkState.POOR: {"timeout": 65, "attempts": 3, "context_chars": 3500, "tools": 5},
             NetworkState.OFFLINE: {"timeout": 5, "attempts": 1, "context_chars": 1500, "tools": 5},
         }[self.state]
-

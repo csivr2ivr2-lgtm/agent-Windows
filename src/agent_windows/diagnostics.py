@@ -7,6 +7,8 @@ import subprocess
 import sys
 
 from .audio.encoder import FFmpegCapabilities
+from .provider_checks import check_providers
+from .livekit_runtime import status as livekit_status
 
 
 def total_memory_bytes() -> int | None:
@@ -56,3 +58,29 @@ def run_llmfit() -> str:
     except OSError as exc:
         return f"llmfit could not start: {exc}"
     return result.stdout if result.returncode == 0 else "llmfit failed: " + result.stderr[:300]
+
+
+def provider_check_report(runtime) -> list[dict]:
+    """Run a tiny live request against every configured LLM provider without printing secrets."""
+    return [result.as_dict() for result in check_providers(runtime.provider_manager.providers)]
+
+
+def realtime_check_report(runtime) -> dict:
+    """Describe the selected realtime execution path without claiming live API success."""
+    livekit = livekit_status(runtime.settings)
+    streaming_stt = any(provider.is_available() for provider in runtime.streaming_stt.providers)
+    streaming_tts = bool(
+        (runtime.tts and runtime.tts.is_available() and hasattr(runtime.tts, "iter_audio"))
+        or (runtime.relay and runtime.relay.is_available() and hasattr(runtime.relay, "iter_tts"))
+    )
+    return {
+        "backend": livekit.backend,
+        "livekit_installed": livekit.installed,
+        "livekit_configured": livekit.configured,
+        "livekit_agent_name": livekit.agent_name,
+        "barge_in": hasattr(runtime.voice, "cancel_playback"),
+        "streaming_stt": streaming_stt,
+        "streaming_llm": hasattr(runtime.provider_manager, "stream"),
+        "streaming_tts": streaming_tts,
+        "microphone_persistent": hasattr(runtime.voice.microphone, "open_pcm_stream"),
+    }

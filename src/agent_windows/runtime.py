@@ -5,18 +5,27 @@ from pathlib import Path
 
 from .audio import OfflineAudioSpool
 from .audio import ResilientUploader, UploadSession
+from .computer_use import ComputerRouter, UFOExecutor, WindowsUseExecutor, build_computer_tools
 from .config import Settings
 from .errors import ProviderUnavailable
+from .hermes_skills import HermesSkillStore, build_hermes_skill_tools
 from .memory import SQLiteMemoryStore
+from .model_lab import ModelLab, build_model_lab_tools
 from .network import NetworkMonitor
+from .needle_integration import NeedleToolPlanner
+from .ponytail import PonytailReviewer, build_ponytail_tools
+from .openhuman_goals import OpenHumanGoalStore, build_openhuman_goal_tools
+from .openviking_memory import OpenVikingClient, TieredMemoryStore
 from .orchestrator import AgentOrchestrator
 from .provider_manager import ProviderManager, RetryPolicy
 from .providers import GeminiProvider, GroqProvider, LocalLLMProvider, OpenRouterProvider
 from .relay import RelayAudioTransport
 from .router import LLMRouter
 from .speech import AssemblyAISTT, DeepgramSTT, ElevenLabsTTS, STTManager
+from .streaming_stt import AssemblyAIStreamingSTT, DeepgramStreamingSTT, StreamingSTTManager
 from .tools import ToolRegistry
 from .voice_runtime import FFmpegMicrophone, VoiceService
+from .web_tools import FirecrawlAdapter, WebRouter, WigoloAdapter, build_web_tools
 from .windows_tools import build_windows_tools
 
 
@@ -25,7 +34,11 @@ class AgentRuntime:
         self.settings = settings
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         self.network = NetworkMonitor()
-        self.memory = SQLiteMemoryStore(settings.data_dir / "memory.sqlite3")
+        sqlite_memory = SQLiteMemoryStore(settings.data_dir / "memory.sqlite3")
+        semantic_memory = OpenVikingClient(
+            settings.openviking_url, settings.openviking_api_key, settings.openviking_session_id
+        ) if settings.openviking_url else None
+        self.memory = TieredMemoryStore(sqlite_memory, semantic_memory)
         providers_by_name = {
             "groq": GroqProvider(api_key=settings.groq_key,model=settings.groq_model,timeout=settings.llm_timeout),
             "gemini": GeminiProvider(api_key=settings.gemini_key,model=settings.gemini_model,timeout=settings.llm_timeout),
@@ -33,15 +46,70 @@ class AgentRuntime:
             "local": LocalLLMProvider(base_url=settings.local_llm_url,model=settings.local_llm_model,timeout=10),
         }
         providers = [providers_by_name[name] for name in settings.llm_order if name in providers_by_name]
-        self.provider_manager = ProviderManager(providers, retry_policy=RetryPolicy(
-            max_attempts=settings.llm_attempts,base_delay=settings.retry_base,max_delay=settings.retry_max,
-            transient_cooldown=settings.transient_cooldown,rate_limit_cooldown=settings.rate_cooldown,
-            auth_cooldown=settings.auth_cooldown), network_monitor=self.network)
-        self.tools = ToolRegistry(build_windows_tools((Path.cwd(), settings.data_dir)))
-        self.agent = AgentOrchestrator(LLMRouter(self.provider_manager), self.memory, self.tools,
-                                       policy_provider=self.network.policy)
+        self.provider_manager = ProviderManager(
+            providers,
+            retry_policy=RetryPolicy(
+                max_attempts=settings.llm_attempts,
+                base_delay=settings.retry_base,
+                max_delay=settings.retry_max,
+                transient_cooldown=settings.transient_cooldown,
+                rate_limit_cooldown=settings.rate_cooldown,
+                auth_cooldown=settings.auth_cooldown,
+            ),
+            network_monitor=self.network,
+            routing_strategy=settings.routing_strategy,
+            provider_costs=settings.provider_costs,
+            provider_quota_headroom=settings.provider_quota_headroom,
+        )
+        self.computer = ComputerRouter(
+            UFOExecutor(Path(settings.ufo_workdir) if settings.ufo_workdir else None),
+            WindowsUseExecutor(settings.windows_use_model),
+            backend=settings.computer_backend,
+        )
+        self.web = WebRouter(
+            WigoloAdapter(settings.wigolo_url, settings.wigolo_token),
+            FirecrawlAdapter(settings.firecrawl_key, settings.firecrawl_url),
+        )
+        self.ponytail = PonytailReviewer(
+            complexity_threshold=settings.ponytail_complexity_threshold
+        )
+        self.needle = NeedleToolPlanner(
+            enabled=settings.needle_enabled,
+            confidence_threshold=settings.needle_confidence_threshold,
+            weights=settings.needle_weights,
+        )
+        self.skills = HermesSkillStore(settings.data_dir / "skills")
+        self.goals = OpenHumanGoalStore(settings.data_dir / "thread-goal.json")
+        self.model_lab = ModelLab(settings.data_dir / "model-lab")
+        tool_list = [
+            *build_windows_tools((Path.cwd(), settings.data_dir)),
+            *build_web_tools(self.web),
+            *build_computer_tools(self.computer),
+            *build_ponytail_tools(self.ponytail),
+            *build_hermes_skill_tools(self.skills),
+            *build_openhuman_goal_tools(self.goals),
+            *build_model_lab_tools(self.model_lab),
+        ]
+        self.tools = ToolRegistry(tool_list)
+        self.agent = AgentOrchestrator(
+            LLMRouter(self.provider_manager),
+            self.memory,
+            self.tools,
+            policy_provider=self.network.policy,
+            tool_planner=self.needle,
+            plan_reviewer=self.ponytail,
+            skill_provider=self.skills,
+            goal_provider=self.goals,
+        )
         stt_by_name = {"assemblyai": AssemblyAISTT(settings.assemblyai_key), "deepgram": DeepgramSTT(settings.deepgram_key)}
         self.stt = STTManager([stt_by_name[n] for n in settings.stt_order if n in stt_by_name])
+        streaming_stt_by_name = {
+            "assemblyai": AssemblyAIStreamingSTT(settings.assemblyai_key),
+            "deepgram": DeepgramStreamingSTT(settings.deepgram_key),
+        }
+        self.streaming_stt = StreamingSTTManager(
+            [streaming_stt_by_name[n] for n in settings.stt_order if n in streaming_stt_by_name]
+        )
         self.tts = ElevenLabsTTS(settings.elevenlabs_key,settings.elevenlabs_voice,model=settings.elevenlabs_model)
         self.relay = RelayAudioTransport(settings.relay_url,settings.relay_token) if settings.relay_url else None
         self.spool = OfflineAudioSpool(settings.data_dir/"audio-spool")
@@ -52,12 +120,26 @@ class AgentRuntime:
         self.provider_manager.apply_network_policy(self.network.policy())
         if text.startswith("/tool "):
             parts=text.split(" ",2); name=parts[1]; args=json.loads(parts[2]) if len(parts)>2 else {}
-            return json.dumps(self.tools.invoke(name,args),ensure_ascii=False,default=str)
+            tool = self.tools.get(name)
+            decision = self.agent.loop.policy_engine.evaluate(tool, args)
+            if not decision.allowed:
+                return json.dumps({
+                    "tool": name,
+                    "error": "confirmation_required" if decision.requires_confirmation else "policy_denied",
+                    "risk": decision.risk.name,
+                    "action_hash": decision.action_hash,
+                }, ensure_ascii=False)
+            result = self.tools.invoke(name,args)
+            return json.dumps({"tool": name, "result": result},ensure_ascii=False,default=str)
         if text.startswith("/memory "):
             return json.dumps(list(self.memory.search(text[8:])),ensure_ascii=False)
         try: return self.agent.handle_text(text)
         except ProviderUnavailable:
             return "אין כרגע מודל זמין. כלי המערכת והזיכרון עדיין עובדים דרך ‎/tool ו־‎/memory."
+
+    def stream_text(self, text: str, *, cancel_event=None):
+        self.provider_manager.apply_network_policy(self.network.policy())
+        yield from self.agent.loop.stream(text, cancel_event=cancel_event)
 
     def recover_audio(self) -> int:
         if not self.relay or not self.relay.health(): return 0

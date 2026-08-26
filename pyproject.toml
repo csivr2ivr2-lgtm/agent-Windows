@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools==82.0.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,16 +10,17 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "pywin32==312; platform_system == 'Windows'",
-  "websocket-client==1.9.0",
+  "websockets==17.0.1",
 ]
 
 [project.scripts]
 agent-windows = "agent_windows.__main__:main"
-agent-windows-livekit = "agent_windows.livekit_agent:main"
+ai-aharon-livekit = "agent_windows.livekit_runtime:main"
 
 [project.optional-dependencies]
-livekit = ["livekit-agents==1.6.10"]
-dev = ["coverage[toml]>=7.6,<8", "ruff>=0.9,<1"]
+dev = ["coverage[toml]==7.13.3", "ruff==0.9.10"]
+realtime = ["livekit-agents[assemblyai,deepgram,elevenlabs]==1.7.0"]
+needle = ["cactus-needle==2.0.8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

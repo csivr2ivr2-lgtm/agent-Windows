@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -29,6 +30,32 @@ def _float(name: str, default: float) -> float:
         return float(os.getenv(name, default))
     except ValueError:
         return default
+
+
+def _bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _json_float_map(name: str) -> dict[str, float]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, item in value.items():
+        try:
+            result[str(key)] = float(item)
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
 @dataclass(frozen=True)
@@ -61,6 +88,28 @@ class Settings:
     relay_token: str
     direct_allowed: bool
     microphone_device: str
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    realtime_backend: str = "auto"
+    livekit_agent_name: str = "ai-aharon"
+    wigolo_url: str = "http://127.0.0.1:3333"
+    wigolo_token: str = ""
+    firecrawl_key: str = ""
+    firecrawl_url: str = "https://api.firecrawl.dev"
+    computer_backend: str = "auto"
+    ufo_workdir: str = ""
+    windows_use_model: str = ""
+    openviking_url: str = ""
+    openviking_api_key: str = ""
+    openviking_session_id: str = "ai-aharon"
+    routing_strategy: str = "auto"
+    provider_costs: dict[str, float] = field(default_factory=dict)
+    provider_quota_headroom: dict[str, float] = field(default_factory=dict)
+    needle_enabled: bool = True
+    needle_confidence_threshold: float = 0.70
+    needle_weights: str = ""
+    ponytail_complexity_threshold: int = 4
 
     @classmethod
     def from_env(cls, dotenv: str | Path = ".env") -> "Settings":
@@ -83,4 +132,21 @@ class Settings:
             os.getenv("ELEVENLABS_MODEL", "eleven_v3"), os.getenv("AGENT_RELAY_BASE_URL", "").rstrip("/"),
             os.getenv("AGENT_RELAY_TOKEN", ""), os.getenv("AGENT_DIRECT_ALLOWED", "true").lower() in {"1","true","yes"},
             os.getenv("AGENT_MICROPHONE_DEVICE", "default"),
+            os.getenv("LIVEKIT_URL", ""), os.getenv("LIVEKIT_API_KEY", ""),
+            os.getenv("LIVEKIT_API_SECRET", ""), os.getenv("AGENT_REALTIME_BACKEND", "auto"),
+            os.getenv("LIVEKIT_AGENT_NAME", "ai-aharon"),
+            os.getenv("WIGOLO_BASE_URL", "http://127.0.0.1:3333"),
+            os.getenv("WIGOLO_TOKEN", ""), os.getenv("FIRECRAWL_API_KEY", ""),
+            os.getenv("FIRECRAWL_BASE_URL", "https://api.firecrawl.dev"),
+            os.getenv("AGENT_COMPUTER_BACKEND", "auto"), os.getenv("UFO_WORKDIR", ""),
+            os.getenv("WINDOWS_USE_MODEL", "") or os.getenv("LOCAL_LLM_MODEL", ""),
+            os.getenv("OPENVIKING_URL", ""), os.getenv("OPENVIKING_API_KEY", ""),
+            os.getenv("OPENVIKING_SESSION_ID", "ai-aharon"),
+            os.getenv("AGENT_ROUTING_STRATEGY", "auto"),
+            _json_float_map("AGENT_PROVIDER_COSTS_JSON"),
+            _json_float_map("AGENT_PROVIDER_QUOTA_HEADROOM_JSON"),
+            _bool("AGENT_NEEDLE_ENABLED", True),
+            _float("AGENT_NEEDLE_CONFIDENCE_THRESHOLD", 0.70),
+            os.getenv("NEEDLE_WEIGHTS", ""),
+            _int("AGENT_PONYTAIL_COMPLEXITY_THRESHOLD", 4),
         )
