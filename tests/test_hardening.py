@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import re
 import os
 import sqlite3
 import tempfile
@@ -204,8 +205,8 @@ class HardeningTests(unittest.TestCase):
         php = Path("relay/public/index.php").read_text(encoding="utf-8")
         for marker in ("hash_equals", "RELAY_TRUST_PROXY", "realpath($root)", "application/octet-stream", "'x+b'", "chmod($target, 0600)"):
             self.assertIn(marker, php)
-        for unsafe in ("eval(", "shell_exec(", "exec("):
-            self.assertNotIn(unsafe, php)
+        for unsafe in ("eval", "shell_exec", "exec"):
+            self.assertIsNone(re.search(rf"(?<![A-Za-z0-9_]){unsafe}\s*\(", php))
 
 
 if __name__ == "__main__":

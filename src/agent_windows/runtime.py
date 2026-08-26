@@ -52,7 +52,17 @@ class AgentRuntime:
         self.provider_manager.apply_network_policy(self.network.policy())
         if text.startswith("/tool "):
             parts=text.split(" ",2); name=parts[1]; args=json.loads(parts[2]) if len(parts)>2 else {}
-            return json.dumps(self.tools.invoke(name,args),ensure_ascii=False,default=str)
+            tool = self.tools.get(name)
+            decision = self.agent.loop.policy_engine.evaluate(tool, args)
+            if not decision.allowed:
+                return json.dumps({
+                    "tool": name,
+                    "error": "confirmation_required" if decision.requires_confirmation else "policy_denied",
+                    "risk": decision.risk.name,
+                    "action_hash": decision.action_hash,
+                }, ensure_ascii=False)
+            result = self.tools.invoke(name,args)
+            return json.dumps({"tool": name, "result": result},ensure_ascii=False,default=str)
         if text.startswith("/memory "):
             return json.dumps(list(self.memory.search(text[8:])),ensure_ascii=False)
         try: return self.agent.handle_text(text)
