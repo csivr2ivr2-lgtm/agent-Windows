@@ -296,8 +296,15 @@ class VoiceRuntimeEdges(unittest.TestCase):
 
         unavailable = SimpleNamespace(is_available=lambda: False)
         service = VoiceService(microphone=None, stt=None, tts=unavailable)
-        with mock.patch("agent_windows.voice_runtime.shutil.which", return_value="ffplay"):
+        with (
+            mock.patch(
+                "agent_windows.voice_runtime.shutil.which",
+                side_effect=lambda program: "ffplay" if program == "ffplay" else None,
+            ),
+            mock.patch.object(service, "_speak_local_sapi") as sapi,
+        ):
             service.speak("x")
+        sapi.assert_called_once_with("x", cancel_event=None, on_audio_start=None)
 
     def test_speak_relay_failure_falls_back_and_speak_chunks(self):
         relay = SimpleNamespace(
