@@ -10,6 +10,7 @@ from .config import Settings
 from .errors import ProviderUnavailable
 from .memory import SQLiteMemoryStore
 from .network import NetworkMonitor
+from .openviking_memory import OpenVikingClient, TieredMemoryStore
 from .orchestrator import AgentOrchestrator
 from .provider_manager import ProviderManager, RetryPolicy
 from .providers import GeminiProvider, GroqProvider, LocalLLMProvider, OpenRouterProvider
@@ -28,7 +29,11 @@ class AgentRuntime:
         self.settings = settings
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         self.network = NetworkMonitor()
-        self.memory = SQLiteMemoryStore(settings.data_dir / "memory.sqlite3")
+        sqlite_memory = SQLiteMemoryStore(settings.data_dir / "memory.sqlite3")
+        semantic_memory = OpenVikingClient(
+            settings.openviking_url, settings.openviking_api_key, settings.openviking_session_id
+        ) if settings.openviking_url else None
+        self.memory = TieredMemoryStore(sqlite_memory, semantic_memory)
         providers_by_name = {
             "groq": GroqProvider(api_key=settings.groq_key,model=settings.groq_model,timeout=settings.llm_timeout),
             "gemini": GeminiProvider(api_key=settings.gemini_key,model=settings.gemini_model,timeout=settings.llm_timeout),

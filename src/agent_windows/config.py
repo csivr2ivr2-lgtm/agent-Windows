@@ -73,6 +73,9 @@ class Settings:
     computer_backend: str = "auto"
     ufo_workdir: str = ""
     windows_use_model: str = ""
+    openviking_url: str = ""
+    openviking_api_key: str = ""
+    openviking_session_id: str = "ai-aharon"
 
     @classmethod
     def from_env(cls, dotenv: str | Path = ".env") -> "Settings":
@@ -103,4 +106,6 @@ class Settings:
             os.getenv("FIRECRAWL_BASE_URL", "https://api.firecrawl.dev"),
             os.getenv("AGENT_COMPUTER_BACKEND", "auto"), os.getenv("UFO_WORKDIR", ""),
             os.getenv("WINDOWS_USE_MODEL", "") or os.getenv("LOCAL_LLM_MODEL", ""),
+            os.getenv("OPENVIKING_URL", ""), os.getenv("OPENVIKING_API_KEY", ""),
+            os.getenv("OPENVIKING_SESSION_ID", "ai-aharon"),
         )
