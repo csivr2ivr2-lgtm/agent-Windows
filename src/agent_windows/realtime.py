@@ -50,7 +50,8 @@ class CancellationScope:
 
 
 class LiveKitSessionAdapter:
-    """Optional LiveKit Agents boundary; local desktop capture/playback stays authoritative."""
+    """Active optional LiveKit Agents runtime boundary."""
+
     def __init__(self, enabled: bool = False):
         self.enabled = enabled
 
@@ -58,7 +59,53 @@ class LiveKitSessionAdapter:
         if not self.enabled:
             return False
         try:
-            import livekit.agents  # noqa: F401
+            from livekit.agents import AgentSession  # noqa: F401
             return True
         except ImportError:
             return False
+
+    def require(self):
+        if not self.enabled:
+            raise RuntimeError("LiveKit Agents runtime is disabled")
+        try:
+            from livekit.agents import Agent, AgentServer, AgentSession, JobContext, cli, inference
+        except ImportError as exc:
+            raise RuntimeError(
+                "LiveKit Agents is not installed; install agent-windows[livekit]"
+            ) from exc
+        return Agent, AgentServer, AgentSession, JobContext, cli, inference
+
+    def build_server(
+        self,
+        *,
+        agent_name: str,
+        instructions: str,
+        stt_model: str,
+        llm_model: str,
+        tts_model: str,
+        tts_voice: str | None = None,
+    ):
+        Agent, AgentServer, AgentSession, JobContext, _cli, inference = self.require()
+        server = AgentServer()
+
+        @server.rtc_session(agent_name=agent_name)
+        async def entrypoint(ctx: JobContext):
+            ctx.log_context_fields = {"room": ctx.room.name, "runtime": "agent-windows-livekit"}
+            tts = inference.TTS(model=tts_model, voice=tts_voice) if tts_voice else inference.TTS(model=tts_model)
+            session = AgentSession(
+                stt=inference.STT(model=stt_model, language="he"),
+                llm=inference.LLM(model=llm_model),
+                tts=tts,
+                preemptive_generation=True,
+            )
+            await session.start(
+                room=ctx.room,
+                agent=Agent(instructions=instructions),
+            )
+            await ctx.connect()
+
+        return server
+
+    def run(self, **server_options) -> None:
+        _Agent, _AgentServer, _AgentSession, _JobContext, cli, _inference = self.require()
+        cli.run_app(self.build_server(**server_options))

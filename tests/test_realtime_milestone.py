@@ -105,3 +105,12 @@ def test_barge_in_monitor_cancels_playback():
     thread.join(timeout=1)
     assert playback_cancel.is_set()
     assert cancelled.is_set()
+
+
+def test_livekit_adapter_is_active_runtime_not_import_probe():
+    from agent_windows.realtime import LiveKitSessionAdapter
+
+    adapter = LiveKitSessionAdapter(enabled=False)
+    assert adapter.available() is False
+    assert callable(adapter.build_server)
+    assert callable(adapter.run)

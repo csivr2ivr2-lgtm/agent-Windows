@@ -15,8 +15,10 @@ dependencies = [
 
 [project.scripts]
 agent-windows = "agent_windows.__main__:main"
+agent-windows-livekit = "agent_windows.livekit_agent:main"
 
 [project.optional-dependencies]
+livekit = ["livekit-agents==1.6.10"]
 dev = ["coverage[toml]>=7.6,<8", "ruff>=0.9,<1"]
 
 [tool.setuptools.packages.find]
