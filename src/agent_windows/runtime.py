@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .audio import OfflineAudioSpool
 from .audio import ResilientUploader, UploadSession
+from .computer_use import ComputerRouter, UFOExecutor, WindowsUseExecutor, build_computer_tools
 from .config import Settings
 from .errors import ProviderUnavailable
 from .memory import SQLiteMemoryStore
@@ -39,6 +40,11 @@ class AgentRuntime:
             max_attempts=settings.llm_attempts,base_delay=settings.retry_base,max_delay=settings.retry_max,
             transient_cooldown=settings.transient_cooldown,rate_limit_cooldown=settings.rate_cooldown,
             auth_cooldown=settings.auth_cooldown), network_monitor=self.network)
+        self.computer = ComputerRouter(
+            UFOExecutor(Path(settings.ufo_workdir) if settings.ufo_workdir else None),
+            WindowsUseExecutor(settings.windows_use_model),
+            backend=settings.computer_backend,
+        )
         self.web = WebRouter(
             WigoloAdapter(settings.wigolo_url, settings.wigolo_token),
             FirecrawlAdapter(settings.firecrawl_key, settings.firecrawl_url),
@@ -46,6 +52,7 @@ class AgentRuntime:
         tool_list = [
             *build_windows_tools((Path.cwd(), settings.data_dir)),
             *build_web_tools(self.web),
+            *build_computer_tools(self.computer),
         ]
         self.tools = ToolRegistry(tool_list)
         self.agent = AgentOrchestrator(LLMRouter(self.provider_manager), self.memory, self.tools,
