@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Callable, Mapping, Sequence
+
+from .contracts import LLMResponse, MemoryStore, Message, ToolCall
+from .optimizer import RequestOptimizer
+from .policy import ConfirmationGrant, PolicyEngine
+from .router import LLMRouter
+from .tools import ToolRegistry
+
+
+class AgentState(str, Enum):
+    RECEIVE = "receive"
+    LOAD_CONTEXT = "load_context"
+    PLAN = "plan"
+    POLICY_CHECK = "policy_check"
+    ACT = "act"
+    OBSERVE = "observe"
+    VERIFY = "verify"
+    RECOVER = "recover"
+    COMPLETE = "complete"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class AgentBudget:
+    max_steps: int = 8
+    max_tool_calls: int = 12
+    max_replans: int = 3
+
+    def __post_init__(self) -> None:
+        if self.max_steps < 1 or self.max_tool_calls < 0 or self.max_replans < 0:
+            raise ValueError("agent budgets must be non-negative and max_steps must be positive")
+
+
+@dataclass(frozen=True)
+class AgentRunResult:
+    text: str
+    state: AgentState
+    steps: int
+    tool_calls: int
+    replans: int
+    provider: str = "unknown"
+
+
+class AgentCancelled(RuntimeError):
+    pass
+
+
+class AgentLoop:
+    """Bounded plan -> act -> observe -> verify loop built on existing agent contracts."""
+
+    def __init__(
+        self,
+        router: LLMRouter,
+        memory: MemoryStore,
+        tools: ToolRegistry,
+        *,
+        system_prompt: str,
+        optimizer: RequestOptimizer | None = None,
+        policy_provider: Callable[[], Mapping[str, int]] | None = None,
+        policy_engine: PolicyEngine | None = None,
+        confirmation_provider: Callable[[ToolCall, str], ConfirmationGrant | None] | None = None,
+    ) -> None:
+        self.router = router
+        self.memory = memory
+        self.tools = tools
+        self.system_prompt = system_prompt
+        self.optimizer = optimizer or RequestOptimizer()
+        self.policy_provider = policy_provider or (lambda: {"context_chars": 12000, "tools": 20})
+        self.policy_engine = policy_engine or PolicyEngine()
+        self.confirmation_provider = confirmation_provider
+
+    def run(
+        self,
+        user_text: str,
+        *,
+        budget: AgentBudget | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> AgentRunResult:
+        budget = budget or AgentBudget()
+        cancelled = cancelled or (lambda: False)
+        context = self.memory.search(user_text)
+        messages = [Message("system", self.system_prompt)]
+        if context:
+            messages.append(Message("system", "Relevant memory:\n" + "\n".join(context)))
+        messages.append(Message("user", user_text))
+
+        steps = tool_calls = replans = 0
+        last_response = LLMResponse()
+        while steps < budget.max_steps:
+            if cancelled():
+                raise AgentCancelled("agent run cancelled")
+            steps += 1
+            optimized, schemas = self._optimized(messages)
+            last_response = self.router.complete(optimized, schemas)
+
+            if not last_response.tool_calls:
+                text = last_response.text.strip()
+                if text:
+                    self.memory.remember(f"User: {user_text}\nAssistant: {text}")
+                return AgentRunResult(
+                    text=text,
+                    state=AgentState.COMPLETE,
+                    steps=steps,
+                    tool_calls=tool_calls,
+                    replans=replans,
+                    provider=last_response.provider,
+                )
+
+            messages = list(optimized)
+            if last_response.text.strip():
+                messages.append(Message("assistant", last_response.text.strip()))
+
+            for call in last_response.tool_calls:
+                if cancelled():
+                    raise AgentCancelled("agent run cancelled")
+                if tool_calls >= budget.max_tool_calls:
+                    return AgentRunResult(
+                        text="Tool-call budget exhausted before the goal was completed.",
+                        state=AgentState.FAILED,
+                        steps=steps,
+                        tool_calls=tool_calls,
+                        replans=replans,
+                        provider=last_response.provider,
+                    )
+                tool_calls += 1
+                outcome, failed = self._execute_tool(call)
+                messages.append(Message("tool", f"{call.name}: {outcome}"))
+                if failed:
+                    replans += 1
+                    if replans > budget.max_replans:
+                        return AgentRunResult(
+                            text=f"Tool recovery budget exhausted after {call.name} failed.",
+                            state=AgentState.FAILED,
+                            steps=steps,
+                            tool_calls=tool_calls,
+                            replans=replans,
+                            provider=last_response.provider,
+                        )
+
+        return AgentRunResult(
+            text=last_response.text.strip() or "Agent step budget exhausted before completion.",
+            state=AgentState.FAILED,
+            steps=steps,
+            tool_calls=tool_calls,
+            replans=replans,
+            provider=last_response.provider,
+        )
+
+    def _optimized(self, messages: Sequence[Message]) -> tuple[list[Message], list[Mapping[str, object]]]:
+        policy = self.policy_provider()
+        optimized, schemas = self.optimizer.optimize(
+            list(messages),
+            self.tools.schemas(),
+            max_chars=int(policy["context_chars"]),
+            max_tools=int(policy["tools"]),
+        )
+        if not optimized or optimized[0].role != "system" or self.system_prompt not in optimized[0].content:
+            optimized = [Message("system", self.system_prompt), *optimized]
+        return optimized, list(schemas)
+
+    def _execute_tool(self, call: ToolCall) -> tuple[object, bool]:
+        try:
+            tool = self.tools.get(call.name)
+        except KeyError as exc:
+            return f"ERROR {exc}", True
+        decision = self.policy_engine.evaluate(tool, call.arguments)
+        if decision.requires_confirmation and self.confirmation_provider:
+            grant = self.confirmation_provider(call, decision.action_hash)
+            decision = self.policy_engine.evaluate(tool, call.arguments, grant=grant)
+        if not decision.allowed:
+            prefix = "CONFIRMATION_REQUIRED" if decision.requires_confirmation else "POLICY_DENIED"
+            return f"{prefix} risk={decision.risk.name} action={decision.action_hash} reason={decision.reason}", True
+        try:
+            return self.tools.invoke(call.name, call.arguments), False
+        except Exception as exc:
+            return f"ERROR {type(exc).__name__}: {exc}", True
