@@ -37,6 +37,19 @@ try {
     }
     if ($LASTEXITCODE -ne 0) { throw 'Windows service installation/update failed.' }
 
+    # pywin32's service host imports this exact class path from the registry.
+    # Verify registration before asking SCM to start the service so a broken
+    # __main__/file-path registration fails fast instead of timing out (1053).
+    $pythonClassKey = "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\$ServiceName\PythonClass"
+    $expectedPythonClass = 'agent_windows.windows_service.AgentWindowsService'
+    if (-not (Test-Path $pythonClassKey)) {
+        throw "pywin32 PythonClass registry key is missing: $pythonClassKey"
+    }
+    $registeredPythonClass = (Get-Item $pythonClassKey).GetValue('')
+    if ($registeredPythonClass -ne $expectedPythonClass) {
+        throw "Invalid pywin32 PythonClass registration: '$registeredPythonClass' (expected '$expectedPythonClass')."
+    }
+
     # Start through the Service Control Manager and verify the actual state.
     Start-Service -Name $ServiceName -ErrorAction Stop
     $service = Get-Service -Name $ServiceName

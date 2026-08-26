@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 SERVICE_NAME = "AgentWindowsAI"
+SERVICE_CLASS_STRING = "agent_windows.windows_service.AgentWindowsService"
 
 
 def _project_root() -> Path:
@@ -107,7 +108,14 @@ def _run_service_command_line() -> int:
         print("Windows service class is unavailable.", file=sys.stderr)
         return 2
 
-    win32serviceutil.HandleCommandLine(service_class)
+    # When this module is launched with ``python -m``, pywin32 otherwise
+    # derives the service class from ``__main__`` / argv[0] and stores a file
+    # path-like value in HKLM\...\PythonClass. pythonservice.exe cannot import
+    # that value when SCM starts the service, which surfaces as error 1053.
+    # Register the stable import path explicitly.
+    win32serviceutil.HandleCommandLine(
+        service_class, serviceClassString=SERVICE_CLASS_STRING
+    )
     return 0
 
 
