@@ -15,7 +15,9 @@ class GuiPolishTests(unittest.TestCase):
         gui = importlib.import_module("agent_windows.desktop_gui")
         self.assertEqual(gui.APP_NAME, "ai aharon")
         self.assertEqual(gui.HEBREW_LABELS["ready"], "מוכן")
-        self.assertEqual(gui.HEBREW_LABELS["agent"], "אהרן AI:")
+        self.assertEqual(gui.HEBREW_LABELS["listening"], "מקשיב")
+        self.assertEqual(gui.HEBREW_LABELS["speaking"], "מדבר")
+        self.assertNotIn("agent", gui.HEBREW_LABELS)
 
     def test_default_prompt_requires_hebrew_and_real_system_tools(self):
         self.assertIn("ענה תמיד בעברית", DEFAULT_SYSTEM_PROMPT)
