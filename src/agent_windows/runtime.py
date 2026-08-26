@@ -78,32 +78,9 @@ class AgentRuntime:
             return "אין כרגע מודל זמין. כלי המערכת והזיכרון עדיין עובדים דרך ‎/tool ו־‎/memory."
 
     def stream_text(self, text: str, *, cancel_event=None):
-        """Stream a conversational answer while preserving memory and network policy.
-
-        The realtime voice path intentionally sends no tool schemas during the streamed
-        generation. Tool-aware streaming is handled by the bounded agent loop in the next
-        stage; this path never fabricates tool results.
-        """
-        from .contracts import Message
-        from .orchestrator import DEFAULT_SYSTEM_PROMPT
-
+        """Stream the same policy-guarded AgentLoop used by text interactions."""
         self.provider_manager.apply_network_policy(self.network.policy())
-        context = self.memory.search(text)
-        messages = [Message("system", DEFAULT_SYSTEM_PROMPT)]
-        if context:
-            messages.append(Message("system", "Relevant memory:\n" + "\n".join(context)))
-        messages.append(Message("user", text))
-        optimized, _schemas = self.agent.loop._optimized(messages)
-        pieces = []
-        for chunk in self.provider_manager.stream(optimized, [], cancel_event=cancel_event):
-            if cancel_event is not None and cancel_event.is_set():
-                return
-            if chunk:
-                pieces.append(chunk)
-                yield chunk
-        answer = "".join(pieces).strip()
-        if answer and not (cancel_event is not None and cancel_event.is_set()):
-            self.memory.remember(f"User: {text}\nAssistant: {answer}")
+        yield from self.agent.loop.stream(text, cancel_event=cancel_event)
 
     def recover_audio(self) -> int:
         if not self.relay or not self.relay.health(): return 0

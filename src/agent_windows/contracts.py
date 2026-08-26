@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Literal, Mapping, Protocol, Sequence
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,29 @@ class LLMResponse:
     text: str = ""
     tool_calls: Sequence[ToolCall] = field(default_factory=tuple)
     provider: str = "unknown"
+
+
+@dataclass(frozen=True)
+class LLMStreamEvent:
+    """Provider-neutral event used by the realtime agent loop.
+
+    Providers may emit text deltas and completed tool calls in the same streamed turn.
+    Tool arguments are only exposed after the provider's JSON fragments have been fully
+    assembled and validated.
+    """
+
+    kind: Literal["text", "tool_call"]
+    provider: str
+    text: str = ""
+    tool_call: ToolCall | None = None
+
+    @classmethod
+    def text_delta(cls, provider: str, text: str) -> "LLMStreamEvent":
+        return cls("text", provider, text=text)
+
+    @classmethod
+    def call(cls, provider: str, tool_call: ToolCall) -> "LLMStreamEvent":
+        return cls("tool_call", provider, tool_call=tool_call)
 
 
 class LLMProvider(Protocol):
@@ -51,4 +74,3 @@ class Tool(Protocol):
     schema: Mapping[str, Any]
 
     def invoke(self, arguments: Mapping[str, Any]) -> Any: ...
-

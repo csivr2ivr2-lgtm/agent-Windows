@@ -4,7 +4,7 @@ import json
 from typing import Any, Iterator, Mapping, Sequence
 from urllib.parse import quote
 
-from ..contracts import LLMResponse, Message, ToolCall
+from ..contracts import LLMResponse, LLMStreamEvent, Message, ToolCall
 from ..errors import ProviderBadResponse
 from ..http import HTTPStatusError, HTTPTransport, UrllibTransport
 from .base import validate_response
@@ -87,20 +87,23 @@ class GeminiProvider:
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ProviderBadResponse("gemini returned malformed JSON") from exc
 
-    def stream(
+    def stream_events(
         self,
         messages: Sequence[Message],
         tools: Sequence[Mapping[str, Any]],
         *,
         cancel_event=None,
-    ) -> Iterator[str]:
+    ) -> Iterator[LLMStreamEvent]:
         stream_sse = getattr(self.transport, "stream_sse", None)
-        if tools or stream_sse is None:
+        if stream_sse is None:
             response = self.complete(messages, tools)
             if response.text:
-                yield response.text
+                yield LLMStreamEvent.text_delta(self.name, response.text)
+            for call in response.tool_calls:
+                yield LLMStreamEvent.call(self.name, call)
             return
 
+        seen_calls: set[str] = set()
         try:
             for raw in stream_sse(
                 self._endpoint("streamGenerateContent") + "?alt=sse",
@@ -119,9 +122,40 @@ class GeminiProvider:
                     for part in parts:
                         text = part.get("text")
                         if text:
-                            yield str(text)
+                            yield LLMStreamEvent.text_delta(self.name, str(text))
+                        raw_call = part.get("functionCall")
+                        if raw_call:
+                            name = str(raw_call.get("name") or "").strip()
+                            arguments = raw_call.get("args") or {}
+                            if not name or not isinstance(arguments, Mapping):
+                                raise ProviderBadResponse("gemini streamed malformed functionCall")
+                            identity = json.dumps(
+                                {"name": name, "arguments": arguments},
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            )
+                            if identity not in seen_calls:
+                                seen_calls.add(identity)
+                                yield LLMStreamEvent.call(
+                                    self.name, ToolCall(name, dict(arguments))
+                                )
+                except ProviderBadResponse:
+                    raise
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     raise ProviderBadResponse("gemini returned malformed streaming JSON") from exc
         except HTTPStatusError as exc:
             validate_response(exc.response, self.name)
             raise AssertionError("unreachable")
+
+    def stream(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[Mapping[str, Any]],
+        *,
+        cancel_event=None,
+    ) -> Iterator[str]:
+        for event in self.stream_events(messages, tools, cancel_event=cancel_event):
+            if event.kind == "text" and event.text:
+                yield event.text

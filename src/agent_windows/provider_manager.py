@@ -5,13 +5,13 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
-from .contracts import LLMProvider, LLMResponse, Message
+from .contracts import LLMProvider, LLMResponse, LLMStreamEvent, Message
 from .errors import (
     ProviderAuthenticationError,
     ProviderConnectionError,
     ProviderError,
-    ProviderRateLimited,
     ProviderPermissionError,
+    ProviderRateLimited,
     ProviderServerError,
     ProviderTimeout,
     ProviderUnavailable,
@@ -39,7 +39,7 @@ class ProviderHealth:
 
 
 class ProviderManager:
-    """Tracks health, bounded retries, cooldowns, and ordered fallback."""
+    """Tracks health, bounded retries, cooldowns, ordered fallback and streaming events."""
 
     def __init__(
         self,
@@ -63,7 +63,8 @@ class ProviderManager:
     def apply_network_policy(self, policy: Mapping[str, Any]) -> None:
         self.retry_policy = RetryPolicy(
             max_attempts=int(policy.get("attempts", self.retry_policy.max_attempts)),
-            base_delay=self.retry_policy.base_delay, max_delay=self.retry_policy.max_delay,
+            base_delay=self.retry_policy.base_delay,
+            max_delay=self.retry_policy.max_delay,
             transient_cooldown=self.retry_policy.transient_cooldown,
             rate_limit_cooldown=self.retry_policy.rate_limit_cooldown,
             auth_cooldown=self.retry_policy.auth_cooldown,
@@ -72,71 +73,120 @@ class ProviderManager:
             if hasattr(provider, "timeout"):
                 provider.timeout = float(policy.get("timeout", provider.timeout))
 
-    def complete(self, messages: Sequence[Message], tools: Sequence[Mapping[str, Any]]) -> LLMResponse:
-        failures = []
+    def _ordered_providers(self):
         providers = self.providers
         if self.network_monitor and self.network_monitor.state.value == "POOR":
             providers = tuple(sorted(providers, key=lambda provider: provider.name != "local"))
-        for provider in providers:
-            if self.network_monitor and self.network_monitor.state.value == "OFFLINE" and provider.name != "local":
-                failures.append(f"{provider.name}: offline")
-                continue
+        return providers
+
+    def _skip_reason(self, provider, state: ProviderHealth, now: float) -> str | None:
+        if self.network_monitor and self.network_monitor.state.value == "OFFLINE" and provider.name != "local":
+            return "offline"
+        if not provider.is_available():
+            return "not configured"
+        if state.cooldown_until > now:
+            return "cooldown"
+        return None
+
+    def complete(self, messages: Sequence[Message], tools: Sequence[Mapping[str, Any]]) -> LLMResponse:
+        failures = []
+        for provider in self._ordered_providers():
             state = self.health[provider.name]
-            now = self._clock()
-            if not provider.is_available():
-                failures.append(f"{provider.name}: not configured")
-                continue
-            if state.cooldown_until > now:
-                failures.append(f"{provider.name}: cooldown")
+            reason = self._skip_reason(provider, state, self._clock())
+            if reason:
+                failures.append(f"{provider.name}: {reason}")
                 continue
             try:
                 started = self._clock()
                 response = self._attempt(provider, messages, tools)
                 if self.network_monitor:
-                    self.network_monitor.record(latency_ms=(self._clock()-started)*1000, success=True)
-                state.healthy = True
-                state.consecutive_failures = 0
-                state.cooldown_until = 0.0
-                state.last_error = None
+                    self.network_monitor.record(latency_ms=(self._clock() - started) * 1000, success=True)
+                self._mark_success(state)
                 return response
             except ProviderError as exc:
-                if self.network_monitor: self.network_monitor.record(success=False)
+                if self.network_monitor:
+                    self.network_monitor.record(success=False)
                 self._record_failure(state, exc)
                 logger.warning("LLM provider %s failed: %s", provider.name, exc)
                 failures.append(f"{provider.name}: {exc}")
         raise ProviderUnavailable("All LLM providers failed: " + "; ".join(failures))
 
-    def stream(self, messages: Sequence[Message], tools: Sequence[Mapping[str, Any]], *, cancel_event=None):
-        """Yield response text incrementally when supported, with safe full-response fallback."""
+    def stream_events(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[Mapping[str, Any]],
+        *,
+        cancel_event=None,
+    ):
+        """Yield provider-neutral text/tool events with ordered fallback.
+
+        Fallback is only allowed before the first externally visible event. Once output has
+        escaped a provider, switching providers could duplicate speech or execute a tool twice,
+        so a mid-stream failure terminates that turn instead of replaying it elsewhere.
+        """
         failures = []
-        for provider in self.providers:
+        for provider in self._ordered_providers():
             state = self.health[provider.name]
-            now = self._clock()
-            if not provider.is_available() or state.cooldown_until > now:
+            reason = self._skip_reason(provider, state, self._clock())
+            if reason:
+                failures.append(f"{provider.name}: {reason}")
                 continue
             if cancel_event is not None and cancel_event.is_set():
                 return
+            emitted = False
             try:
-                if hasattr(provider, "stream"):
-                    for chunk in provider.stream(messages, tools, cancel_event=cancel_event):
-                        if cancel_event is not None and cancel_event.is_set():
-                            return
-                        if chunk:
-                            yield chunk
+                started = self._clock()
+                if hasattr(provider, "stream_events"):
+                    source = provider.stream_events(messages, tools, cancel_event=cancel_event)
+                elif hasattr(provider, "stream"):
+                    source = (
+                        LLMStreamEvent.text_delta(provider.name, chunk)
+                        for chunk in provider.stream(messages, tools, cancel_event=cancel_event)
+                        if chunk
+                    )
                 else:
                     response = self._attempt(provider, messages, tools)
+                    events = []
                     if response.text:
-                        yield response.text
-                state.healthy = True
-                state.consecutive_failures = 0
-                state.cooldown_until = 0.0
-                state.last_error = None
+                        events.append(LLMStreamEvent.text_delta(provider.name, response.text))
+                    events.extend(LLMStreamEvent.call(provider.name, call) for call in response.tool_calls)
+                    source = iter(events)
+
+                for event in source:
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
+                    emitted = True
+                    yield event
+
+                if self.network_monitor:
+                    self.network_monitor.record(latency_ms=(self._clock() - started) * 1000, success=True)
+                self._mark_success(state)
                 return
             except ProviderError as exc:
+                if self.network_monitor:
+                    self.network_monitor.record(success=False)
                 self._record_failure(state, exc)
+                logger.warning("LLM provider %s stream failed: %s", provider.name, exc)
+                if emitted:
+                    raise ProviderUnavailable(
+                        f"{provider.name} stream failed after output began: {exc}"
+                    ) from exc
                 failures.append(f"{provider.name}: {exc}")
         if failures:
             raise ProviderUnavailable("All LLM providers failed: " + "; ".join(failures))
+
+    def stream(self, messages: Sequence[Message], tools: Sequence[Mapping[str, Any]], *, cancel_event=None):
+        """Backward-compatible text-only view over ``stream_events``."""
+        for event in self.stream_events(messages, tools, cancel_event=cancel_event):
+            if event.kind == "text" and event.text:
+                yield event.text
+
+    @staticmethod
+    def _mark_success(state: ProviderHealth) -> None:
+        state.healthy = True
+        state.consecutive_failures = 0
+        state.cooldown_until = 0.0
+        state.last_error = None
 
     def _attempt(self, provider, messages, tools) -> LLMResponse:
         policy = self.retry_policy

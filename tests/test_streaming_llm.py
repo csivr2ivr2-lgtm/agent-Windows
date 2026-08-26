@@ -72,6 +72,36 @@ class StreamingLLMTests(unittest.TestCase):
         with self.assertRaises(ProviderPermissionError):
             list(provider.stream([Message("user", "x")], []))
 
+    def test_openai_stream_assembles_tool_call_argument_fragments(self):
+        transport = StreamTransport([
+            json.dumps({
+                "choices": [{"delta": {"tool_calls": [{
+                    "index": 0,
+                    "function": {"name": "current_time", "arguments": "{\"zone\":"},
+                }]}}]
+            }).encode(),
+            json.dumps({
+                "choices": [{"delta": {"tool_calls": [{
+                    "index": 0,
+                    "function": {"arguments": "\"local\"}"},
+                }]}}]
+            }).encode(),
+            b"[DONE]",
+        ])
+        provider = OpenAICompatibleProvider(
+            api_key="k", model="m", endpoint="https://example.test", transport=transport
+        )
+        events = list(provider.stream_events(
+            [Message("user", "מה השעה")],
+            [{"name": "current_time", "description": "clock", "parameters": {}}],
+        ))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].kind, "tool_call")
+        self.assertEqual(events[0].tool_call.name, "current_time")
+        self.assertEqual(events[0].tool_call.arguments, {"zone": "local"})
+        self.assertTrue(transport.calls[0][2]["stream"])
+        self.assertIn("tools", transport.calls[0][2])
+
     def test_gemini_stream_uses_stream_generate_content(self):
         transport = StreamTransport([
             json.dumps({
@@ -88,17 +118,21 @@ class StreamingLLMTests(unittest.TestCase):
         self.assertIn("gemini-2.5-flash:streamGenerateContent?alt=sse", url)
         self.assertNotIn("models%2F", url)
 
-    def test_tools_use_nonstreaming_path_until_tool_stream_contract_exists(self):
-        transport = StreamTransport()
-        provider = OpenAICompatibleProvider(
-            api_key="k", model="m", endpoint="https://example.test", transport=transport
-        )
-        chunks = list(provider.stream(
+    def test_gemini_stream_emits_function_call_and_deduplicates_repeated_part(self):
+        chunk = json.dumps({
+            "candidates": [{"content": {"parts": [{
+                "functionCall": {"name": "current_time", "args": {"zone": "local"}}
+            }]}}]
+        }).encode()
+        transport = StreamTransport([chunk, chunk])
+        provider = GeminiProvider(api_key="g", model="gemini-2.5-flash", transport=transport)
+        events = list(provider.stream_events(
             [Message("user", "x")],
-            [{"name": "clock", "description": "clock", "parameters": {}}],
+            [{"name": "current_time", "description": "clock", "parameters": {}}],
         ))
-        self.assertEqual(chunks, ["fallback"])
-        self.assertNotIn("stream", transport.calls[0][2])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].tool_call.name, "current_time")
+        self.assertEqual(events[0].tool_call.arguments, {"zone": "local"})
 
 
 if __name__ == "__main__":

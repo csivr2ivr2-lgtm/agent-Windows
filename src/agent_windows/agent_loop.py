@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Iterator, Mapping, Sequence
 
 from .contracts import LLMResponse, MemoryStore, Message, ToolCall
 from .optimizer import RequestOptimizer
@@ -150,6 +150,73 @@ class AgentLoop:
             replans=replans,
             provider=last_response.provider,
         )
+
+    def stream(
+        self,
+        user_text: str,
+        *,
+        budget: AgentBudget | None = None,
+        cancel_event=None,
+    ) -> Iterator[str]:
+        """Stream a bounded tool-aware agent turn for realtime voice.
+
+        Text deltas are forwarded immediately. Tool-call events stay internal, pass through
+        the same policy engine as non-streaming turns, and their observations are fed back
+        into the next model step before the final spoken answer continues.
+        """
+        budget = budget or AgentBudget()
+        context = self.memory.search(user_text)
+        messages = [Message("system", self.system_prompt)]
+        if context:
+            messages.append(Message("system", "Relevant memory:\n" + "\n".join(context)))
+        messages.append(Message("user", user_text))
+
+        steps = tool_calls = replans = 0
+        spoken: list[str] = []
+        while steps < budget.max_steps:
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            steps += 1
+            optimized, schemas = self._optimized(messages)
+            calls: list[ToolCall] = []
+            step_text: list[str] = []
+            for event in self.router.stream_events(optimized, schemas, cancel_event=cancel_event):
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                if event.kind == "text" and event.text:
+                    step_text.append(event.text)
+                    spoken.append(event.text)
+                    yield event.text
+                elif event.kind == "tool_call" and event.tool_call is not None:
+                    calls.append(event.tool_call)
+
+            if not calls:
+                answer = "".join(spoken).strip()
+                if answer:
+                    self.memory.remember(f"User: {user_text}\nAssistant: {answer}")
+                return
+
+            messages = list(optimized)
+            assistant_text = "".join(step_text).strip()
+            if assistant_text:
+                messages.append(Message("assistant", assistant_text))
+
+            for call in calls:
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                if tool_calls >= budget.max_tool_calls:
+                    yield " הגעתי למגבלת פעולות הכלים במשימה הזאת."
+                    return
+                tool_calls += 1
+                outcome, failed = self._execute_tool(call)
+                messages.append(Message("tool", f"{call.name}: {outcome}"))
+                if failed:
+                    replans += 1
+                    if replans > budget.max_replans:
+                        yield " לא הצלחתי להשלים את הפעולה אחרי ניסיונות התאוששות."
+                        return
+
+        yield " הגעתי למגבלת שלבי הביצוע לפני שהמשימה הושלמה."
 
     def _optimized(self, messages: Sequence[Message]) -> tuple[list[Message], list[Mapping[str, object]]]:
         policy = self.policy_provider()

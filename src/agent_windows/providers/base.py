@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterator, Mapping, Sequence
 
-from ..contracts import LLMResponse, Message, ToolCall
+from ..contracts import LLMResponse, LLMStreamEvent, Message, ToolCall
 from ..errors import (
     ProviderAuthenticationError,
     ProviderBadResponse,
@@ -107,25 +107,23 @@ class OpenAICompatibleProvider:
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ProviderBadResponse(f"{self.name} returned malformed JSON") from exc
 
-    def stream(
+    def stream_events(
         self,
         messages: Sequence[Message],
         tools: Sequence[Mapping[str, Any]],
         *,
         cancel_event=None,
-    ) -> Iterator[str]:
-        """Stream text deltas.
-
-        Tool-call turns intentionally use the regular completion path until a unified
-        tool-call stream event contract is active, so tool semantics aren't silently lost.
-        """
+    ) -> Iterator[LLMStreamEvent]:
         stream_sse = getattr(self.transport, "stream_sse", None)
-        if tools or stream_sse is None:
+        if stream_sse is None:
             response = self.complete(messages, tools)
             if response.text:
-                yield response.text
+                yield LLMStreamEvent.text_delta(self.name, response.text)
+            for call in response.tool_calls:
+                yield LLMStreamEvent.call(self.name, call)
             return
 
+        fragments: dict[int, dict[str, str]] = {}
         try:
             data_stream = stream_sse(
                 self.endpoint,
@@ -137,7 +135,7 @@ class OpenAICompatibleProvider:
                 if cancel_event is not None and cancel_event.is_set():
                     return
                 if raw == b"[DONE]":
-                    return
+                    break
                 try:
                     data = json.loads(raw)
                     choices = data.get("choices") or []
@@ -146,7 +144,15 @@ class OpenAICompatibleProvider:
                     delta = choices[0].get("delta") or {}
                     text = delta.get("content")
                     if text:
-                        yield str(text)
+                        yield LLMStreamEvent.text_delta(self.name, str(text))
+                    for raw_call in delta.get("tool_calls") or []:
+                        index = int(raw_call.get("index", 0))
+                        state = fragments.setdefault(index, {"name": "", "arguments": ""})
+                        function = raw_call.get("function") or {}
+                        if function.get("name"):
+                            state["name"] += str(function["name"])
+                        if function.get("arguments"):
+                            state["arguments"] += str(function["arguments"])
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     raise ProviderBadResponse(
                         f"{self.name} returned malformed streaming JSON"
@@ -154,3 +160,32 @@ class OpenAICompatibleProvider:
         except HTTPStatusError as exc:
             validate_response(exc.response, self.name)
             raise AssertionError("unreachable")
+
+        for index in sorted(fragments):
+            fragment = fragments[index]
+            name = fragment["name"].strip()
+            if not name:
+                raise ProviderBadResponse(f"{self.name} streamed a tool call without a name")
+            raw_arguments = fragment["arguments"].strip()
+            try:
+                arguments = json.loads(raw_arguments) if raw_arguments else {}
+            except json.JSONDecodeError as exc:
+                raise ProviderBadResponse(
+                    f"{self.name} streamed malformed tool arguments"
+                ) from exc
+            if not isinstance(arguments, Mapping):
+                raise ProviderBadResponse(
+                    f"{self.name} streamed non-object tool arguments"
+                )
+            yield LLMStreamEvent.call(self.name, ToolCall(name, arguments))
+
+    def stream(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[Mapping[str, Any]],
+        *,
+        cancel_event=None,
+    ) -> Iterator[str]:
+        for event in self.stream_events(messages, tools, cancel_event=cancel_event):
+            if event.kind == "text" and event.text:
+                yield event.text
