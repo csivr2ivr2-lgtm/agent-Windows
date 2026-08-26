@@ -25,6 +25,8 @@ class AgentOrchestrator:
         policy_provider=None,
         policy_engine: PolicyEngine | None = None,
         confirmation_provider=None,
+        tool_planner=None,
+        plan_reviewer=None,
     ) -> None:
         self.router = router
         self.memory = memory
@@ -40,6 +42,8 @@ class AgentOrchestrator:
             policy_provider=self.policy_provider,
             policy_engine=policy_engine,
             confirmation_provider=confirmation_provider,
+            tool_planner=tool_planner,
+            plan_reviewer=plan_reviewer,
         )
 
     @staticmethod

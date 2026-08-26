@@ -10,6 +10,8 @@ from .config import Settings
 from .errors import ProviderUnavailable
 from .memory import SQLiteMemoryStore
 from .network import NetworkMonitor
+from .needle_integration import NeedleToolPlanner
+from .ponytail import PonytailReviewer, build_ponytail_tools
 from .openviking_memory import OpenVikingClient, TieredMemoryStore
 from .orchestrator import AgentOrchestrator
 from .provider_manager import ProviderManager, RetryPolicy
@@ -41,10 +43,21 @@ class AgentRuntime:
             "local": LocalLLMProvider(base_url=settings.local_llm_url,model=settings.local_llm_model,timeout=10),
         }
         providers = [providers_by_name[name] for name in settings.llm_order if name in providers_by_name]
-        self.provider_manager = ProviderManager(providers, retry_policy=RetryPolicy(
-            max_attempts=settings.llm_attempts,base_delay=settings.retry_base,max_delay=settings.retry_max,
-            transient_cooldown=settings.transient_cooldown,rate_limit_cooldown=settings.rate_cooldown,
-            auth_cooldown=settings.auth_cooldown), network_monitor=self.network)
+        self.provider_manager = ProviderManager(
+            providers,
+            retry_policy=RetryPolicy(
+                max_attempts=settings.llm_attempts,
+                base_delay=settings.retry_base,
+                max_delay=settings.retry_max,
+                transient_cooldown=settings.transient_cooldown,
+                rate_limit_cooldown=settings.rate_cooldown,
+                auth_cooldown=settings.auth_cooldown,
+            ),
+            network_monitor=self.network,
+            routing_strategy=settings.routing_strategy,
+            provider_costs=settings.provider_costs,
+            provider_quota_headroom=settings.provider_quota_headroom,
+        )
         self.computer = ComputerRouter(
             UFOExecutor(Path(settings.ufo_workdir) if settings.ufo_workdir else None),
             WindowsUseExecutor(settings.windows_use_model),
@@ -54,14 +67,29 @@ class AgentRuntime:
             WigoloAdapter(settings.wigolo_url, settings.wigolo_token),
             FirecrawlAdapter(settings.firecrawl_key, settings.firecrawl_url),
         )
+        self.ponytail = PonytailReviewer(
+            complexity_threshold=settings.ponytail_complexity_threshold
+        )
+        self.needle = NeedleToolPlanner(
+            enabled=settings.needle_enabled,
+            confidence_threshold=settings.needle_confidence_threshold,
+            weights=settings.needle_weights,
+        )
         tool_list = [
             *build_windows_tools((Path.cwd(), settings.data_dir)),
             *build_web_tools(self.web),
             *build_computer_tools(self.computer),
+            *build_ponytail_tools(self.ponytail),
         ]
         self.tools = ToolRegistry(tool_list)
-        self.agent = AgentOrchestrator(LLMRouter(self.provider_manager), self.memory, self.tools,
-                                       policy_provider=self.network.policy)
+        self.agent = AgentOrchestrator(
+            LLMRouter(self.provider_manager),
+            self.memory,
+            self.tools,
+            policy_provider=self.network.policy,
+            tool_planner=self.needle,
+            plan_reviewer=self.ponytail,
+        )
         stt_by_name = {"assemblyai": AssemblyAISTT(settings.assemblyai_key), "deepgram": DeepgramSTT(settings.deepgram_key)}
         self.stt = STTManager([stt_by_name[n] for n in settings.stt_order if n in stt_by_name])
         streaming_stt_by_name = {

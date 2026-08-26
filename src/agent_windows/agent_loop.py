@@ -64,6 +64,8 @@ class AgentLoop:
         policy_provider: Callable[[], Mapping[str, int]] | None = None,
         policy_engine: PolicyEngine | None = None,
         confirmation_provider: Callable[[ToolCall, str], ConfirmationGrant | None] | None = None,
+        tool_planner=None,
+        plan_reviewer=None,
     ) -> None:
         self.router = router
         self.memory = memory
@@ -73,6 +75,8 @@ class AgentLoop:
         self.policy_provider = policy_provider or (lambda: {"context_chars": 12000, "tools": 20})
         self.policy_engine = policy_engine or PolicyEngine()
         self.confirmation_provider = confirmation_provider
+        self.tool_planner = tool_planner
+        self.plan_reviewer = plan_reviewer
 
     def run(
         self,
@@ -90,6 +94,18 @@ class AgentLoop:
         messages.append(Message("user", user_text))
 
         steps = tool_calls = replans = 0
+        tool_calls, replans, planner_failure = self._apply_tool_planner(
+            user_text, messages, budget, tool_calls, replans, cancelled=cancelled
+        )
+        if planner_failure:
+            return AgentRunResult(
+                text=planner_failure,
+                state=AgentState.FAILED,
+                steps=steps,
+                tool_calls=tool_calls,
+                replans=replans,
+                provider="needle",
+            )
         last_response = LLMResponse()
         while steps < budget.max_steps:
             if cancelled():
@@ -115,7 +131,8 @@ class AgentLoop:
             if last_response.text.strip():
                 messages.append(Message("assistant", last_response.text.strip()))
 
-            for call in last_response.tool_calls:
+            calls = self._review_calls(last_response.tool_calls)
+            for call in calls:
                 if cancelled():
                     raise AgentCancelled("agent run cancelled")
                 if tool_calls >= budget.max_tool_calls:
@@ -172,6 +189,13 @@ class AgentLoop:
         messages.append(Message("user", user_text))
 
         steps = tool_calls = replans = 0
+        cancelled = lambda: bool(cancel_event is not None and cancel_event.is_set())
+        tool_calls, replans, planner_failure = self._apply_tool_planner(
+            user_text, messages, budget, tool_calls, replans, cancelled=cancelled
+        )
+        if planner_failure:
+            yield " לא הצלחתי להשלים את תכנון הכלים המקומי בבטחה."
+            return
         spoken: list[str] = []
         while steps < budget.max_steps:
             if cancel_event is not None and cancel_event.is_set():
@@ -196,6 +220,7 @@ class AgentLoop:
                     self.memory.remember(f"User: {user_text}\nAssistant: {answer}")
                 return
 
+            calls = list(self._review_calls(calls))
             messages = list(optimized)
             assistant_text = "".join(step_text).strip()
             if assistant_text:
@@ -217,6 +242,49 @@ class AgentLoop:
                         return
 
         yield " הגעתי למגבלת שלבי הביצוע לפני שהמשימה הושלמה."
+
+    def _review_calls(self, calls: Sequence[ToolCall]) -> tuple[ToolCall, ...]:
+        if not self.plan_reviewer or not calls:
+            return tuple(calls)
+        try:
+            review = self.plan_reviewer.review_tool_calls(calls)
+            reviewed = getattr(review, "calls", calls)
+            return tuple(reviewed)
+        except Exception:
+            return tuple(calls)
+
+    def _apply_tool_planner(
+        self,
+        user_text: str,
+        messages: list[Message],
+        budget: AgentBudget,
+        tool_calls: int,
+        replans: int,
+        *,
+        cancelled: Callable[[], bool],
+    ) -> tuple[int, int, str | None]:
+        if self.tool_planner is None or cancelled():
+            return tool_calls, replans, None
+        try:
+            plan = self.tool_planner.plan(user_text, self.tools.schemas())
+        except Exception:
+            return tool_calls, replans, None
+        if not getattr(plan, "accepted", False):
+            return tool_calls, replans, None
+        planned_calls = self._review_calls(getattr(plan, "calls", ()))
+        for call in planned_calls:
+            if cancelled():
+                raise AgentCancelled("agent run cancelled")
+            if tool_calls >= budget.max_tool_calls:
+                return tool_calls, replans, "Tool-call budget exhausted during local tool planning."
+            tool_calls += 1
+            outcome, failed = self._execute_tool(call)
+            messages.append(Message("tool", f"Needle preplan {call.name}: {outcome}"))
+            if failed:
+                replans += 1
+                if replans > budget.max_replans:
+                    return tool_calls, replans, f"Tool recovery budget exhausted after {call.name} failed."
+        return tool_calls, replans, None
 
     def _optimized(self, messages: Sequence[Message]) -> tuple[list[Message], list[Mapping[str, object]]]:
         policy = self.policy_provider()
