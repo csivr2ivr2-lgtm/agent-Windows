@@ -184,7 +184,7 @@ class MVPTests(unittest.TestCase):
             with self.assertRaises(ProviderConnectionError): service.listen()
 
 
-@unittest.skipUnless(shutil.which("php") and os.name != "nt", "PHP relay integration runs only on non-Windows CI")
+@unittest.skipUnless(shutil.which("php"), "PHP CLI not installed")
 class PHPRelayIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
