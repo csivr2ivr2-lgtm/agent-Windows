@@ -5,13 +5,14 @@ from .contracts import MemoryStore, Message
 from .optimizer import RequestOptimizer
 from .policy import PolicyEngine
 from .router import LLMRouter
+from .spoken_text import local_time_reply, matches_local_time_query
 from .tools import ToolRegistry
 
 
 DEFAULT_SYSTEM_PROMPT = (
     "אתה העוזר האישי של אהרן. ענה תמיד בעברית, קצר וברור, אלא אם המשתמש ביקש שפה אחרת. "
     "אל תנחש שעה, תאריך או מידע מערכת. כאשר הבקשה תלויה במידע כזה, השתמש בכלי המערכת "
-    "המתאים ורק אחר כך ענה."
+    "המתאים ורק אחר כך ענה. הקפד על רווחים, פסיקים ונקודות טבעיים כדי שהקראה בקול תישמע אנושית."
 )
 
 
@@ -57,4 +58,7 @@ class AgentOrchestrator:
         return [Message("system", DEFAULT_SYSTEM_PROMPT), *messages]
 
     def handle_text(self, user_text: str) -> str:
+        # Current time is a deterministic Windows-host fact; never let an LLM guess it.
+        if matches_local_time_query(user_text):
+            return local_time_reply()
         return self.loop.run(user_text).text
