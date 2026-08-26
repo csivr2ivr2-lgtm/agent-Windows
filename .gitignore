@@ -10,3 +10,6 @@ htmlcov/
 .mypy_cache/
 data/
 logs/
+build/
+src/*.egg-info/
+assets/ai-aharon.ico
