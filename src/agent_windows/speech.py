@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-from .errors import ProviderAuthenticationError, ProviderBadResponse, ProviderConnectionError, ProviderRateLimited, ProviderServerError, ProviderTimeout
+from .errors import ProviderAuthenticationError, ProviderBadResponse, ProviderConnectionError, ProviderPermissionError, ProviderRateLimited, ProviderServerError, ProviderTimeout
 from .http import HTTPResponse, _read_limited
 
 
@@ -35,7 +35,8 @@ class UrllibBinaryClient:
 
 
 def _check(response: HTTPResponse, provider: str):
-    if response.status in (401, 403): raise ProviderAuthenticationError(f"{provider} authentication failed")
+    if response.status == 401: raise ProviderAuthenticationError(f"{provider} authentication failed (HTTP 401)")
+    if response.status == 403: raise ProviderPermissionError(f"{provider} permission/model access denied (HTTP 403)")
     if response.status == 429: raise ProviderRateLimited(f"{provider} rate limited")
     if response.status >= 500: raise ProviderServerError(f"{provider} server error {response.status}")
     if not 200 <= response.status < 300: raise ProviderBadResponse(f"{provider} HTTP {response.status}")

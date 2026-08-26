@@ -40,9 +40,62 @@ def _spool_file(spool, encoded: Path, session_id: str, profile) -> None:
             spool.put(chunk, session_metadata=_audio_metadata(profile))
 
 
+class FFmpegPCMStream:
+    """Long-lived 16 kHz mono PCM16 microphone stream for realtime sessions."""
+
+    def __init__(self, process: subprocess.Popen, *, frame_bytes: int):
+        self.process = process
+        self.frame_bytes = frame_bytes
+        self.closed = False
+
+    def read_frame(self) -> bytes:
+        if self.closed or self.process.stdout is None:
+            return b""
+        return self.process.stdout.read(self.frame_bytes)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=2)
+
+    def __enter__(self) -> "FFmpegPCMStream":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
+
+
 class FFmpegMicrophone:
     def __init__(self, device="default", *, ffmpeg="ffmpeg", max_seconds=30, start_timeout=8):
         self.device, self.ffmpeg, self.max_seconds, self.start_timeout = device, ffmpeg, max_seconds, start_timeout
+
+    def open_pcm_stream(self, *, frame_ms: int = 50) -> FFmpegPCMStream:
+        if not 20 <= frame_ms <= 1000:
+            raise ValueError("frame_ms must be between 20 and 1000")
+        if shutil.which(self.ffmpeg) is None:
+            raise MicrophoneUnavailable("FFmpeg is not installed or not on PATH")
+        if not __import__("sys").platform.startswith("win"):
+            raise MicrophoneUnavailable("voice capture requires Windows")
+        command = [
+            self.ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-f", "dshow", "-i", f"audio={self.device}",
+            "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1",
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            **hidden_subprocess_kwargs(),
+        )
+        frame_bytes = int(16000 * 2 * (frame_ms / 1000.0))
+        return FFmpegPCMStream(process, frame_bytes=frame_bytes)
 
     def capture_pcm_utterance(self, target: Path, vad: EnergyVAD) -> None:
         if shutil.which(self.ffmpeg) is None: raise MicrophoneUnavailable("FFmpeg is not installed or not on PATH")

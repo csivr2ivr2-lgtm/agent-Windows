@@ -15,6 +15,7 @@ from .providers import GeminiProvider, GroqProvider, LocalLLMProvider, OpenRoute
 from .relay import RelayAudioTransport
 from .router import LLMRouter
 from .speech import AssemblyAISTT, DeepgramSTT, ElevenLabsTTS, STTManager
+from .streaming_stt import AssemblyAIStreamingSTT, DeepgramStreamingSTT, StreamingSTTManager
 from .tools import ToolRegistry
 from .voice_runtime import FFmpegMicrophone, VoiceService
 from .windows_tools import build_windows_tools
@@ -42,6 +43,13 @@ class AgentRuntime:
                                        policy_provider=self.network.policy)
         stt_by_name = {"assemblyai": AssemblyAISTT(settings.assemblyai_key), "deepgram": DeepgramSTT(settings.deepgram_key)}
         self.stt = STTManager([stt_by_name[n] for n in settings.stt_order if n in stt_by_name])
+        streaming_stt_by_name = {
+            "assemblyai": AssemblyAIStreamingSTT(settings.assemblyai_key),
+            "deepgram": DeepgramStreamingSTT(settings.deepgram_key),
+        }
+        self.streaming_stt = StreamingSTTManager(
+            [streaming_stt_by_name[n] for n in settings.stt_order if n in streaming_stt_by_name]
+        )
         self.tts = ElevenLabsTTS(settings.elevenlabs_key,settings.elevenlabs_voice,model=settings.elevenlabs_model)
         self.relay = RelayAudioTransport(settings.relay_url,settings.relay_token) if settings.relay_url else None
         self.spool = OfflineAudioSpool(settings.data_dir/"audio-spool")
@@ -68,6 +76,34 @@ class AgentRuntime:
         try: return self.agent.handle_text(text)
         except ProviderUnavailable:
             return "אין כרגע מודל זמין. כלי המערכת והזיכרון עדיין עובדים דרך ‎/tool ו־‎/memory."
+
+    def stream_text(self, text: str, *, cancel_event=None):
+        """Stream a conversational answer while preserving memory and network policy.
+
+        The realtime voice path intentionally sends no tool schemas during the streamed
+        generation. Tool-aware streaming is handled by the bounded agent loop in the next
+        stage; this path never fabricates tool results.
+        """
+        from .contracts import Message
+        from .orchestrator import DEFAULT_SYSTEM_PROMPT
+
+        self.provider_manager.apply_network_policy(self.network.policy())
+        context = self.memory.search(text)
+        messages = [Message("system", DEFAULT_SYSTEM_PROMPT)]
+        if context:
+            messages.append(Message("system", "Relevant memory:\n" + "\n".join(context)))
+        messages.append(Message("user", text))
+        optimized, _schemas = self.agent.loop._optimized(messages)
+        pieces = []
+        for chunk in self.provider_manager.stream(optimized, [], cancel_event=cancel_event):
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            if chunk:
+                pieces.append(chunk)
+                yield chunk
+        answer = "".join(pieces).strip()
+        if answer and not (cancel_event is not None and cancel_event.is_set()):
+            self.memory.remember(f"User: {text}\nAssistant: {answer}")
 
     def recover_audio(self) -> int:
         if not self.relay or not self.relay.health(): return 0
