@@ -4,7 +4,24 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $UserPython = Join-Path $Root '.venv\Scripts\python.exe'
 $UserPythonw = Join-Path $Root '.venv\Scripts\pythonw.exe'
 $EnvFile = Join-Path $Root '.env'
+$IconPath = Join-Path $Root 'assets\ai-aharon.ico'
+$IconBase64Path = Join-Path $Root 'assets\ai-aharon.ico.b64'
 $ServiceName = 'AgentWindowsAI'
+
+function Initialize-AiAharonIcon {
+    if (Test-Path $IconPath) { return }
+    if (-not (Test-Path $IconBase64Path)) {
+        throw "Application icon source not found: $IconBase64Path"
+    }
+    $encoded = (Get-Content -Path $IconBase64Path -Raw).Trim()
+    try {
+        $bytes = [Convert]::FromBase64String($encoded)
+    }
+    catch {
+        throw "Application icon source is invalid Base64: $IconBase64Path"
+    }
+    [IO.File]::WriteAllBytes($IconPath, $bytes)
+}
 
 $ServiceRoot = Join-Path $env:ProgramData 'AgentWindowsAI'
 $RuntimeRoot = Join-Path $ServiceRoot 'python-runtime'
@@ -16,6 +33,10 @@ if (-not (Test-Path $UserPython)) {
 }
 if (-not (Test-Path $EnvFile)) {
     throw ".env not found: $EnvFile"
+}
+Initialize-AiAharonIcon
+if (-not (Test-Path $IconPath)) {
+    throw "Application icon not found: $IconPath"
 }
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -184,12 +205,16 @@ try {
 
     # Create a desktop shortcut for the graphical client.
     $desktop = [Environment]::GetFolderPath('Desktop')
-    $shortcutPath = Join-Path $desktop 'Agent Windows AI.lnk'
+    $oldShortcutPath = Join-Path $desktop 'Agent Windows AI.lnk'
+    Remove-Item -Path $oldShortcutPath -Force -ErrorAction SilentlyContinue
+    $shortcutPath = Join-Path $desktop 'ai aharon.lnk'
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = $UserPythonw
     $shortcut.Arguments = '-m agent_windows.desktop_gui --env "{0}"' -f $EnvFile
     $shortcut.WorkingDirectory = $Root
+    $shortcut.IconLocation = "$IconPath,0"
+    $shortcut.Description = 'ai aharon'
     $shortcut.Save()
 
     Start-Process -FilePath $UserPythonw `
@@ -202,7 +227,7 @@ try {
     Write-Host 'Agent Windows service installed and running.' -ForegroundColor Green
     Write-Host "Service: $ServiceName (Automatic / Running)"
     Write-Host "Service runtime: $ServiceRoot"
-    Write-Host 'Graphical companion: starts automatically when you sign in.'
+    Write-Host 'ai aharon: starts automatically when you sign in.'
     Write-Host 'Use the desktop shortcut, the microphone button, or Ctrl+Alt+Space.'
     Write-Host "Log: $(Join-Path $OldData 'session-agent.log')"
 }

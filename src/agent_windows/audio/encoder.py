@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import subprocess
+
+from ..windows_subprocess import hidden_subprocess_kwargs
 from dataclasses import dataclass
 from typing import BinaryIO, Protocol
 
@@ -18,8 +20,10 @@ class FFmpegCapabilities:
 
     def supported_codecs(self) -> set[str]:
         try:
-            result = subprocess.run([self.executable, "-hide_banner", "-encoders"], capture_output=True,
-                                    text=True, timeout=10, check=False)
+            result = subprocess.run(
+                [self.executable, "-hide_banner", "-encoders"], capture_output=True,
+                text=True, timeout=10, check=False, **hidden_subprocess_kwargs()
+            )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return set()
         output = result.stdout + result.stderr

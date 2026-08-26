@@ -11,6 +11,7 @@ from pathlib import Path
 from .audio import AudioChunker, EnergyVAD, FFmpegCapabilities, NetworkState, ResilientUploader, ffmpeg_command, profile_for
 from .audio.transport import UploadInterrupted
 from .errors import ProviderConnectionError, ProviderError
+from .windows_subprocess import hidden_subprocess_kwargs
 
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,12 @@ class FFmpegMicrophone:
         if not __import__("sys").platform.startswith("win"): raise MicrophoneUnavailable("voice capture requires Windows")
         command = [self.ffmpeg,"-hide_banner","-loglevel","error","-f","dshow","-i",f"audio={self.device}",
                    "-ac","1","-ar","16000","-f","s16le","pipe:1"]
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            **hidden_subprocess_kwargs(),
+        )
         started, speech_seen, started_at = False, False, time.monotonic()
         try:
             with target.open("wb") as output:
@@ -87,7 +93,14 @@ class VoiceService:
             pcm, encoded = Path(directory)/"utterance.pcm", Path(directory)/"utterance.audio"
             self.microphone.capture_pcm_utterance(pcm, vad)
             with pcm.open("rb") as source, encoded.open("wb") as destination:
-                result = subprocess.run(ffmpeg_command(profile), stdin=source, stdout=destination, stderr=subprocess.PIPE, timeout=45)
+                result = subprocess.run(
+                    ffmpeg_command(profile),
+                    stdin=source,
+                    stdout=destination,
+                    stderr=subprocess.PIPE,
+                    timeout=45,
+                    **hidden_subprocess_kwargs(),
+                )
             if result.returncode: raise RuntimeError("FFmpeg audio encoding failed")
             session_id = uuid.uuid4().hex
             if state is NetworkState.OFFLINE:
@@ -120,6 +133,7 @@ class VoiceService:
                 process = subprocess.Popen(
                     [player, "-nodisp", "-autoexit", "-loglevel", "error", "-i", "pipe:0"],
                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    **hidden_subprocess_kwargs(),
                 )
                 for chunk in self.relay.iter_tts(text, language="he"):
                     if not chunk:
@@ -149,4 +163,8 @@ class VoiceService:
         with tempfile.TemporaryDirectory() as directory:
             audio_path = Path(directory) / "speech.mp3"
             audio_path.write_bytes(audio)
-            subprocess.run([player, "-nodisp", "-autoexit", "-loglevel", "error", str(audio_path)], check=False)
+            subprocess.run(
+                [player, "-nodisp", "-autoexit", "-loglevel", "error", str(audio_path)],
+                check=False,
+                **hidden_subprocess_kwargs(),
+            )

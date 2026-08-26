@@ -21,6 +21,27 @@ MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 VK_SPACE = 0x20
 WM_HOTKEY = 0x0312
+APP_NAME = "ai aharon"
+HEBREW_LABELS = {
+    "ready": "מוכן",
+    "listening": "מקשיב",
+    "thinking": "חושב",
+    "speaking": "מדבר",
+    "error": "שגיאה",
+    "user": "אתה:",
+    "agent": "אהרן AI:",
+    "send": "שלח",
+    "talk": "דבר",
+    "clear": "נקה שיחה",
+}
+
+
+def _icon_path() -> Path | None:
+    candidates = (
+        Path(__file__).resolve().parents[2] / "assets" / "ai-aharon.ico",
+        Path.cwd() / "assets" / "ai-aharon.ico",
+    )
+    return next((path for path in candidates if path.is_file()), None)
 
 
 class AgentDesktopApp:
@@ -37,15 +58,19 @@ class AgentDesktopApp:
         self._closing = threading.Event()
         self._service_ok = False
 
-        root.title("Agent Windows AI")
-        root.geometry("720x760")
-        root.minsize(560, 560)
+        root.title(APP_NAME)
+        root.geometry("760x780")
+        root.minsize(580, 600)
+        root.configure(background="#f4f7fb")
         root.protocol("WM_DELETE_WINDOW", self.close)
 
         try:
-            root.iconname("Agent Windows AI")
+            root.iconname(APP_NAME)
+            icon = _icon_path()
+            if icon:
+                root.iconbitmap(default=str(icon))
         except Exception:
-            pass
+            LOGGER.debug("Could not load application icon", exc_info=True)
 
         self._build_ui(scrolledtext)
         self._start_health_monitor()
@@ -55,23 +80,44 @@ class AgentDesktopApp:
         ttk = self.ttk
         tk = self.tk
 
-        outer = ttk.Frame(self.root, padding=14)
+        style = ttk.Style(self.root)
+        if "vista" in style.theme_names():
+            style.theme_use("vista")
+        style.configure("App.TFrame", background="#f4f7fb")
+        style.configure("Header.TLabel", background="#f4f7fb", foreground="#172033")
+        style.configure("Status.TLabel", background="#e8f2ff", foreground="#0759b8", padding=10)
+        style.configure("Mic.TButton", font=("Segoe UI", 13, "bold"), padding=(24, 12))
+
+        outer = ttk.Frame(self.root, padding=18, style="App.TFrame")
         outer.pack(fill="both", expand=True)
 
-        header = ttk.Frame(outer)
+        header = ttk.Frame(outer, style="App.TFrame")
         header.pack(fill="x", pady=(0, 10))
-        ttk.Label(header, text="Agent Windows AI", font=("Segoe UI", 18, "bold")).pack(side="right")
-        self.service_label = ttk.Label(header, text="בודק שירות…")
+        ttk.Label(
+            header, text=APP_NAME, font=("Segoe UI", 20, "bold"), style="Header.TLabel"
+        ).pack(side="right")
+        self.service_label = ttk.Label(header, text="בודק חיבור…", style="Header.TLabel")
         self.service_label.pack(side="left")
 
-        self.status_var = tk.StringVar(value="מוכן")
-        ttk.Label(outer, textvariable=self.status_var, anchor="e").pack(fill="x", pady=(0, 8))
+        self.status_var = tk.StringVar(value=HEBREW_LABELS["ready"])
+        ttk.Label(
+            outer,
+            textvariable=self.status_var,
+            anchor="e",
+            font=("Segoe UI", 12, "bold"),
+            style="Status.TLabel",
+        ).pack(fill="x", pady=(0, 10))
 
         self.chat = scrolledtext.ScrolledText(
             outer,
             wrap="word",
             state="disabled",
             font=("Segoe UI", 11),
+            background="#ffffff",
+            foreground="#172033",
+            insertbackground="#172033",
+            relief="flat",
+            borderwidth=1,
             padx=10,
             pady=10,
         )
@@ -87,19 +133,28 @@ class AgentDesktopApp:
         self.entry.pack(side="right", fill="x", expand=True)
         self.entry.bind("<Return>", lambda _event: self.send_text())
 
-        self.send_button = ttk.Button(controls, text="שלח", command=self.send_text)
+        self.send_button = ttk.Button(
+            controls, text=HEBREW_LABELS["send"], command=self.send_text
+        )
         self.send_button.pack(side="right", padx=(8, 0))
 
         actions = ttk.Frame(outer)
         actions.pack(fill="x", pady=(10, 0))
 
-        self.mic_button = ttk.Button(actions, text="🎤  דבר", command=self.start_voice)
+        self.mic_button = ttk.Button(
+            actions,
+            text=f"🎤  {HEBREW_LABELS['talk']}",
+            command=self.start_voice,
+            style="Mic.TButton",
+        )
         self.mic_button.pack(side="right", ipadx=20, ipady=8)
 
         self.speak_text = tk.BooleanVar(value=False)
         ttk.Checkbutton(actions, text="הקרא גם הודעות כתובות", variable=self.speak_text).pack(side="right", padx=12)
 
-        ttk.Button(actions, text="נקה שיחה", command=self.clear_chat).pack(side="left")
+        ttk.Button(
+            actions, text=HEBREW_LABELS["clear"], command=self.clear_chat
+        ).pack(side="left")
 
         ttk.Separator(outer).pack(fill="x", pady=(12, 8))
         ttk.Label(
@@ -114,7 +169,11 @@ class AgentDesktopApp:
         if threading.current_thread() is not threading.main_thread():
             self.root.after(0, lambda: self._append(role, text))
             return
-        prefix = {"user": "אתה: ", "agent": "Agent: ", "system": ""}.get(role, "")
+        prefix = {
+            "user": HEBREW_LABELS["user"] + " ",
+            "agent": HEBREW_LABELS["agent"] + " ",
+            "system": "",
+        }.get(role, "")
         self.chat.configure(state="normal")
         self.chat.insert("end", prefix + text.strip() + "\n", role)
         self.chat.configure(state="disabled")
@@ -146,7 +205,7 @@ class AgentDesktopApp:
         except RuntimeError:
             pass
         self.root.after(0, lambda: self._set_controls_enabled(True))
-        self._set_status("מוכן")
+        self._set_status(HEBREW_LABELS["ready"])
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -179,14 +238,15 @@ class AgentDesktopApp:
 
     def _text_worker(self, text: str, speak: bool) -> None:
         try:
-            self._set_status("חושב…")
+            self._set_status(HEBREW_LABELS["thinking"])
             answer = self._answer(text)
             self._append("agent", answer)
             if speak:
-                self._set_status("מדבר…")
+                self._set_status(HEBREW_LABELS["speaking"])
                 self.runtime.voice.speak(answer)
         except Exception as exc:
             LOGGER.exception("GUI text interaction failed")
+            self._set_status(HEBREW_LABELS["error"])
             self._append("system", f"שגיאה: {exc}")
         finally:
             self._end_job()
@@ -198,16 +258,17 @@ class AgentDesktopApp:
 
     def _voice_worker(self) -> None:
         try:
-            self._set_status("מקשיב… דבר עכשיו")
+            self._set_status(HEBREW_LABELS["listening"])
             text = self.runtime.voice.listen()
             self._append("user", text)
-            self._set_status("חושב…")
+            self._set_status(HEBREW_LABELS["thinking"])
             answer = self._answer(text)
             self._append("agent", answer)
-            self._set_status("מדבר…")
+            self._set_status(HEBREW_LABELS["speaking"])
             self.runtime.voice.speak(answer)
         except Exception as exc:
             LOGGER.exception("GUI voice interaction failed")
+            self._set_status(HEBREW_LABELS["error"])
             self._append("system", f"שגיאת קול: {exc}")
         finally:
             self._end_job()
@@ -267,10 +328,10 @@ def _configure_file_logging(data_dir: Path) -> None:
 
 def main(argv=None) -> int:
     if not sys.platform.startswith("win"):
-        print("Agent Windows GUI is only available on Windows.", file=sys.stderr)
+        print("הממשק ai aharon זמין רק ב-Windows.", file=sys.stderr)
         return 2
 
-    parser = argparse.ArgumentParser(prog="agent-windows-gui")
+    parser = argparse.ArgumentParser(prog="ai-aharon")
     parser.add_argument("--env", default=".env")
     parser.add_argument("--minimized", action="store_true")
     args = parser.parse_args(argv)

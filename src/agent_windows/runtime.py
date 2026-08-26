@@ -57,7 +57,7 @@ class AgentRuntime:
             return json.dumps(list(self.memory.search(text[8:])),ensure_ascii=False)
         try: return self.agent.handle_text(text)
         except ProviderUnavailable:
-            return "Offline reasoning is unavailable. Local tools and memory still work; use /tool or /memory."
+            return "אין כרגע מודל זמין. כלי המערכת והזיכרון עדיין עובדים דרך ‎/tool ו־‎/memory."
 
     def recover_audio(self) -> int:
         if not self.relay or not self.relay.health(): return 0
