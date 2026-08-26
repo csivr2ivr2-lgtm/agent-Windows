@@ -8,6 +8,7 @@ import logging
 from .config import Settings
 from .diagnostics import collect, provider_check_report, realtime_check_report, run_llmfit
 from .integrations import integrations_report
+from .final_checks import build_final_report, write_final_report
 from .logging_utils import configure_logging
 from .model_fit import model_fit_report
 from .runtime import AgentRuntime
@@ -22,6 +23,7 @@ def main(argv=None) -> int:
     doctor=sub.add_parser("doctor"); doctor.add_argument("--llmfit",action="store_true")
     sub.add_parser("benchmark"); sub.add_parser("providers-check"); sub.add_parser("realtime-check")
     sub.add_parser("integrations-check"); sub.add_parser("routing-check"); sub.add_parser("model-lab-status")
+    final=sub.add_parser("final-check"); final.add_argument("--live",action="store_true"); final.add_argument("--output")
     fit=sub.add_parser("model-fit"); fit.add_argument("--params",type=float); fit.add_argument("--quant",default="q4"); fit.add_argument("--context",type=int,default=8192); fit.add_argument("--model",default="candidate")
     prepare=sub.add_parser("model-lab-prepare")
     prepare.add_argument("--backend",choices=("unsloth","soup"),required=True)
@@ -74,6 +76,15 @@ def _run(args, runtime) -> int:
     if args.command=="routing-check":
         print(json.dumps(runtime.provider_manager.routing_snapshot(), indent=2, ensure_ascii=False))
         return 0
+    if args.command=="final-check":
+        report = build_final_report(runtime, live=args.live)
+        if args.output:
+            path = write_final_report(report, args.output)
+            print(report["summary"])
+            print(f"Report: {path}")
+        else:
+            print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+        return 0 if report["overall"] in {"PASS", "CODE_READY_EXTERNAL_VALIDATION_REQUIRED"} else 2
     if args.command=="providers-check":
         report = provider_check_report(runtime)
         print(json.dumps(report, indent=2, ensure_ascii=False))
