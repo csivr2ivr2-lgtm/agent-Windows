@@ -5,11 +5,12 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 from dataclasses import asdict, dataclass
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
+from .safe_http import SafeHTTPError, request_bytes
+from .security import SecurityValidationError, validate_service_base_url
 from .windows_subprocess import hidden_subprocess_kwargs
 
 _GIB = 1024 ** 3
@@ -111,8 +112,11 @@ def _windows_memory() -> tuple[int | None, int | None]:
 def _windows_gpu_names() -> tuple[str, ...]:
     if not sys_platform_is_windows():
         return ()
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        return ()
     command = [
-        "powershell.exe",
+        powershell,
         "-NoProfile",
         "-NonInteractive",
         "-Command",
@@ -241,19 +245,27 @@ def infer_parameter_billions(name: str) -> float | None:
 
 
 def _ollama_tags(base_url: str, timeout: float = 1.5) -> list[dict]:
-    url = base_url.rstrip("/")
-    if url.endswith("/v1"):
-        url = url[:-3]
-    req = Request(url + "/api/tags", headers={"Accept": "application/json"})
+    raw_base = str(base_url or "").rstrip("/")
+    if raw_base.endswith("/v1"):
+        raw_base = raw_base[:-3]
     try:
-        with urlopen(req, timeout=timeout) as response:
-            raw = response.read(2 * 1024 * 1024 + 1)
-    except (OSError, URLError):
-        return []
-    if len(raw) > 2 * 1024 * 1024:
+        url = validate_service_base_url(raw_base)
+    except SecurityValidationError:
         return []
     try:
-        data = json.loads(raw)
+        response = request_bytes(
+            url + "/api/tags",
+            method="GET",
+            headers={"Accept": "application/json"},
+            timeout=timeout,
+            max_response_bytes=2 * 1024 * 1024,
+        )
+    except SafeHTTPError:
+        return []
+    if not 200 <= response.status < 300:
+        return []
+    try:
+        data = json.loads(response.body)
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
     models = data.get("models") if isinstance(data, dict) else None
@@ -277,7 +289,10 @@ def installed_ollama_fits(
             continue
         quant = str(details.get("quantization_level") or "q4")
         fits.append(assess_model_fit(name, params, quantization=quant, hardware=hardware))
-    return sorted(fits, key=lambda fit: (-fit.score, fit.estimated_required_bytes, fit.model.casefold()))
+    return sorted(
+        fits,
+        key=lambda fit: (-fit.score, fit.estimated_required_bytes, fit.model.casefold()),
+    )
 
 
 def model_fit_report(
