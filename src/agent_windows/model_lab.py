@@ -14,9 +14,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .security import SecurityValidationError, resolve_within
 from .windows_subprocess import hidden_subprocess_kwargs
 from .windows_tools import FunctionTool
 
+
+_JOB_ID = re.compile(r"^[0-9]{9,12}-(?:unsloth|soup)-[0-9a-f]{8}$")
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*)([^\s,;]+)"),
@@ -91,9 +94,11 @@ def _redact_value(value):
 class TrainingDatasetManager:
     """Explicit-opt-in dataset copy with redaction and provenance metadata."""
 
-    def __init__(self, root: str | Path) -> None:
-        self.root = Path(root).resolve()
+    def __init__(self, root: str | Path, *, export_root: str | Path | None = None) -> None:
+        self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self.export_root = Path(export_root).expanduser().resolve() if export_root else self.root
+        self.export_root.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def _validate_source(source: str | Path) -> Path:
@@ -123,11 +128,25 @@ class TrainingDatasetManager:
             return [_redact_value(item) for item in payload[: max(1, int(rows))]]
         return [_redact_value(payload)]
 
+    def preview_managed(self, source: str | Path, *, rows: int = 3) -> list[object]:
+        """Preview only datasets already imported into the managed dataset directory."""
+        candidate = Path(source).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.root / candidate
+        try:
+            managed = resolve_within(self.root, candidate, must_exist=True)
+        except SecurityValidationError as exc:
+            raise PermissionError("dataset preview must stay inside the managed dataset directory") from exc
+        return self.preview(managed, rows=rows)
+
     def export(self, source: str | Path, destination: str | Path, *, approved: bool) -> Path:
         if not approved:
             raise PermissionError("dataset export requires explicit approval")
         source_path = self._validate_source(source)
-        target = Path(destination).resolve()
+        try:
+            target = resolve_within(self.export_root, destination)
+        except SecurityValidationError as exc:
+            raise PermissionError("dataset export destination escapes the approved ModelLab root") from exc
         target.parent.mkdir(parents=True, exist_ok=True)
         if source_path.suffix.casefold() == ".jsonl":
             fd, temp_name = tempfile.mkstemp(prefix="dataset-", suffix=".tmp", dir=target.parent)
@@ -166,7 +185,7 @@ class ModelLab:
         self.root = Path(root).resolve()
         self.jobs_dir = self.root / "jobs"
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
-        self.datasets = TrainingDatasetManager(self.root / "datasets")
+        self.datasets = TrainingDatasetManager(self.root / "datasets", export_root=self.root)
 
     @staticmethod
     def _nvidia_gpus() -> tuple[GPUInfo, ...]:
@@ -214,11 +233,40 @@ class ModelLab:
 
     def _job_dir(self, backend: str) -> tuple[str, Path]:
         job_id = f"{int(time.time())}-{backend}-{uuid.uuid4().hex[:8]}"
-        directory = (self.jobs_dir / job_id).resolve()
-        if self.jobs_dir not in directory.parents:
-            raise ValueError("job path escaped ModelLab root")
+        directory = resolve_within(self.jobs_dir, self.jobs_dir / job_id)
         directory.mkdir(parents=True, exist_ok=False)
         return job_id, directory
+
+    def _load_job(self, job_id: str) -> tuple[Path, dict[str, Any]]:
+        value = str(job_id).strip()
+        if not _JOB_ID.fullmatch(value):
+            raise KeyError("invalid ModelLab job id")
+        try:
+            directory = resolve_within(self.jobs_dir, self.jobs_dir / value, must_exist=True)
+        except (SecurityValidationError, FileNotFoundError) as exc:
+            raise KeyError(f"unknown ModelLab job: {value}") from exc
+        job_path = directory / "job.json"
+        if not job_path.is_file():
+            raise KeyError(f"unknown ModelLab job: {value}")
+        try:
+            raw = json.loads(job_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("ModelLab job metadata is invalid") from exc
+        if not isinstance(raw, dict) or raw.get("job_id") != value:
+            raise ValueError("ModelLab job metadata identity mismatch")
+        backend = str(raw.get("backend") or "").casefold()
+        if backend not in {"unsloth", "soup"}:
+            raise ValueError("ModelLab job backend is invalid")
+        expected_config = directory / ("train_unsloth.py" if backend == "unsloth" else "soup.yaml")
+        expected_dataset = directory / "dataset.jsonl"
+        if not expected_config.is_file() or not expected_dataset.is_file():
+            raise ValueError("ModelLab job artifacts are incomplete")
+        job = dict(raw)
+        job["backend"] = backend
+        job["job_dir"] = str(directory)
+        job["dataset"] = str(expected_dataset)
+        job["config_or_script"] = str(expected_config)
+        return directory, job
 
     def prepare(self, backend: str, source: str | Path, model: str, *, approved_dataset: bool) -> ModelLabJob:
         normalized = str(backend).strip().casefold()
@@ -241,7 +289,6 @@ class ModelLab:
 
     @staticmethod
     def _unsloth_script(model: str, dataset: Path, output: Path) -> str:
-        # Uses the current public FastLanguageModel + TRL SFTConfig surface; no ai-aharon secrets.
         return f'''from datasets import load_dataset\nfrom trl import SFTConfig, SFTTrainer\nfrom unsloth import FastLanguageModel, is_bfloat16_supported\n\nMODEL = {model!r}\nDATASET = {str(dataset)!r}\nOUTPUT = {str(output)!r}\nMAX_SEQ = 2048\n\nmodel, tokenizer = FastLanguageModel.from_pretrained(\n    model_name=MODEL, max_seq_length=MAX_SEQ, dtype=None, load_in_4bit=True\n)\nmodel = FastLanguageModel.get_peft_model(\n    model, r=16, lora_alpha=16, lora_dropout=0, bias="none",\n    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],\n    use_gradient_checkpointing="unsloth", random_state=3407,\n)\ndataset = load_dataset("json", data_files=DATASET, split="train")\n\ndef to_text(row):\n    if isinstance(row.get("text"), str) and row["text"].strip():\n        return {{"text": row["text"]}}\n    instruction = str(row.get("instruction", ""))\n    user_input = str(row.get("input", ""))\n    output = str(row.get("output", row.get("response", "")))\n    return {{"text": f"Instruction: {{instruction}}\\nInput: {{user_input}}\\nResponse: {{output}}"}}\n\ndataset = dataset.map(to_text)\nargs = SFTConfig(\n    output_dir=OUTPUT, dataset_text_field="text", max_length=MAX_SEQ,\n    per_device_train_batch_size=1, gradient_accumulation_steps=4,\n    num_train_epochs=1, learning_rate=2e-4, logging_steps=1,\n    fp16=not is_bfloat16_supported(), bf16=is_bfloat16_supported(), report_to="none",\n)\ntrainer = SFTTrainer(model=model, processing_class=tokenizer, train_dataset=dataset, args=args)\ntrainer.train()\nmodel.save_pretrained(OUTPUT)\ntokenizer.save_pretrained(OUTPUT)\n'''
 
     @staticmethod
@@ -270,10 +317,7 @@ class ModelLab:
         )
 
     def run(self, job_id: str, *, approved_run: bool, execute: bool = False) -> dict[str, Any]:
-        directory = (self.jobs_dir / str(job_id)).resolve()
-        if self.jobs_dir not in directory.parents or not directory.is_dir():
-            raise KeyError(f"unknown ModelLab job: {job_id}")
-        job = json.loads((directory / "job.json").read_text(encoding="utf-8"))
+        directory, job = self._load_job(job_id)
         backend = str(job["backend"])
         status = self.status()
         if not execute:
@@ -315,10 +359,7 @@ class ModelLab:
         return report
 
     def soup_dry_run(self, job_id: str) -> dict[str, Any]:
-        directory = (self.jobs_dir / str(job_id)).resolve()
-        if self.jobs_dir not in directory.parents or not directory.is_dir():
-            raise KeyError(f"unknown ModelLab job: {job_id}")
-        job = json.loads((directory / "job.json").read_text(encoding="utf-8"))
+        directory, job = self._load_job(job_id)
         if job.get("backend") != "soup":
             raise ValueError("soup_dry_run requires a Soup job")
         executable = shutil.which("soup")
@@ -346,7 +387,7 @@ def build_model_lab_tools(lab: ModelLab) -> list[FunctionTool]:
         return lab.status().as_dict()
 
     def preview(args: Mapping[str, object]):
-        return lab.datasets.preview(str(args.get("dataset") or ""), rows=int(args.get("rows") or 3))
+        return lab.datasets.preview_managed(str(args.get("dataset") or ""), rows=int(args.get("rows") or 3))
 
     return [
         FunctionTool(
