@@ -10,6 +10,7 @@ $LogPath = Join-Path $Desktop 'ai-aharon-finalize.log'
 $TempLog = Join-Path $env:TEMP 'ai-aharon-finalize.log'
 $IntegrationRoot = Join-Path $env:LOCALAPPDATA 'ai-aharon\integrations'
 $UfoRoot = Join-Path $IntegrationRoot 'UFO'
+$UfoCommit = 'cd9bfdd6caacee7b8c5894605f42207ec84b6e47'
 
 function Write-Step([string]$Text) {
     Write-Host "`n==> $Text" -ForegroundColor Cyan
@@ -37,7 +38,8 @@ function Set-EnvValue([string]$Name, [string]$Value) {
         }
     }
     if (-not $found) { $lines += "$Name=$Value" }
-    Set-Content -Path $EnvFile -Value $lines -Encoding UTF8
+    $utf8NoBom = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllLines($EnvFile, $lines, $utf8NoBom)
 }
 
 function Get-EnvValue([string]$Name) {
@@ -49,22 +51,28 @@ function Get-EnvValue([string]$Name) {
 }
 
 function Install-UfoIsolated {
-    Write-Step 'Preparing Microsoft UFO² in an isolated virtual environment'
+    Write-Step 'Preparing pinned Microsoft UFO² in an isolated virtual environment'
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Write-Warning 'git is unavailable; UFO² installation skipped. The final report will mark it for external validation.'
         return
     }
     New-Item -ItemType Directory -Path $IntegrationRoot -Force | Out-Null
     if (-not (Test-Path (Join-Path $UfoRoot '.git'))) {
-        & git clone --depth 1 https://github.com/microsoft/UFO.git $UfoRoot
+        & git clone --no-checkout https://github.com/microsoft/UFO.git $UfoRoot
         if ($LASTEXITCODE -ne 0) {
             Write-Warning 'UFO² clone failed; continuing with Windows-Use fallback.'
             return
         }
     }
-    else {
-        & git -C $UfoRoot pull --ff-only
-        if ($LASTEXITCODE -ne 0) { Write-Warning 'UFO² update failed; using the existing checkout.' }
+    & git -C $UfoRoot fetch --depth 1 origin $UfoCommit
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning 'Could not fetch the pinned UFO² revision; Windows-Use remains available as fallback.'
+        return
+    }
+    & git -C $UfoRoot checkout --detach --force $UfoCommit
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning 'Could not checkout the pinned UFO² revision; Windows-Use remains available as fallback.'
+        return
     }
 
     $UfoPython = Join-Path $UfoRoot '.venv\Scripts\python.exe'
@@ -77,7 +85,7 @@ function Install-UfoIsolated {
     }
     $Requirements = Join-Path $UfoRoot 'requirements.txt'
     if (Test-Path $Requirements) {
-        & $UfoPython -m pip install -r $Requirements
+        & $UfoPython -m pip install --disable-pip-version-check -r $Requirements
         if ($LASTEXITCODE -ne 0) {
             Write-Warning 'UFO² dependencies failed to install; Windows-Use remains available as fallback.'
             return

@@ -186,11 +186,7 @@ class VoiceService:
                 pass
 
     def _play_stream(self, player: str, chunks, *, cancel_event=None, on_audio_start=None) -> bool:
-        """Feed encoded audio chunks to one hidden ffplay process.
-
-        Returns True once at least one audio chunk was written. Cancellation kills
-        playback immediately and leaves no queued audio in the player process.
-        """
+        """Feed encoded audio chunks to one hidden ffplay process."""
         process = None
 
         def cancelled() -> bool:
@@ -238,16 +234,66 @@ class VoiceService:
                 if self._playback_process is process:
                     self._playback_process = None
 
-    def speak(self, text: str, *, cancel_event=None, on_audio_start=None) -> None:
-        player = shutil.which("ffplay")
-        if not player:
-            return
+    def _speak_local_sapi(self, text: str, *, cancel_event=None, on_audio_start=None) -> bool:
+        """Speak through the built-in Windows SAPI stack without cloud/network use.
 
+        The PowerShell program is fixed and receives only a temporary file path,
+        so untrusted model text is never interpolated into a command line.
+        The process is registered as playback, allowing barge-in to kill it.
+        """
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        if not powershell or not __import__("sys").platform.startswith("win"):
+            return False
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        script = (
+            "Add-Type -AssemblyName System.Speech; "
+            "$t=Get-Content -Raw -Encoding UTF8 -LiteralPath $args[0]; "
+            "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            "$s.Speak($t); $s.Dispose()"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            text_path = Path(directory) / "speech.txt"
+            text_path.write_text(text, encoding="utf-8")
+            process = subprocess.Popen(
+                [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script, str(text_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **hidden_subprocess_kwargs(),
+            )
+            with self._playback_lock:
+                self._playback_process = process
+            if on_audio_start is not None:
+                on_audio_start()
+            try:
+                while process.poll() is None:
+                    if cancel_event is not None and cancel_event.is_set():
+                        process.kill()
+                        break
+                    time.sleep(0.02)
+                process.wait(timeout=2)
+                return True
+            except subprocess.TimeoutExpired:
+                process.kill()
+                return True
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                with self._playback_lock:
+                    if self._playback_process is process:
+                        self._playback_process = None
+
+    def speak(self, text: str, *, cancel_event=None, on_audio_start=None) -> None:
         def cancelled() -> bool:
             return bool(cancel_event is not None and cancel_event.is_set())
 
         if cancelled():
             return
+        player = shutil.which("ffplay")
+        if not player:
+            self._speak_local_sapi(text, cancel_event=cancel_event, on_audio_start=on_audio_start)
+            return
+
         if self.relay and self.relay.is_available() and hasattr(self.relay, "iter_tts"):
             try:
                 if self._play_stream(
@@ -260,9 +306,9 @@ class VoiceService:
             except (ProviderError, OSError, subprocess.SubprocessError) as exc:
                 logger.warning("Relay TTS streaming failed: %s", exc)
 
-        if cancelled() or not self.tts or not self.tts.is_available():
+        if cancelled():
             return
-        if hasattr(self.tts, "iter_audio"):
+        if self.tts and self.tts.is_available() and hasattr(self.tts, "iter_audio"):
             try:
                 if self._play_stream(
                     player,
@@ -276,7 +322,15 @@ class VoiceService:
 
         if cancelled():
             return
-        audio = self.tts.synthesize(text, language="he")
+        if not self.tts or not self.tts.is_available():
+            self._speak_local_sapi(text, cancel_event=cancel_event, on_audio_start=on_audio_start)
+            return
+        try:
+            audio = self.tts.synthesize(text, language="he")
+        except (ProviderError, OSError, subprocess.SubprocessError) as exc:
+            logger.warning("Buffered cloud TTS failed; using local SAPI: %s", exc)
+            self._speak_local_sapi(text, cancel_event=cancel_event, on_audio_start=on_audio_start)
+            return
         if cancelled():
             return
         with tempfile.TemporaryDirectory() as directory:
