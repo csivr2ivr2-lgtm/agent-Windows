@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 import logging
 
 from .config import Settings
@@ -22,8 +21,15 @@ def main(argv=None) -> int:
     sub.add_parser("chat"); sub.add_parser("voice"); sub.add_parser("status")
     doctor=sub.add_parser("doctor"); doctor.add_argument("--llmfit",action="store_true")
     sub.add_parser("benchmark"); sub.add_parser("providers-check"); sub.add_parser("realtime-check")
-    sub.add_parser("integrations-check"); sub.add_parser("routing-check")
+    sub.add_parser("integrations-check"); sub.add_parser("routing-check"); sub.add_parser("model-lab-status")
     fit=sub.add_parser("model-fit"); fit.add_argument("--params",type=float); fit.add_argument("--quant",default="q4"); fit.add_argument("--context",type=int,default=8192); fit.add_argument("--model",default="candidate")
+    prepare=sub.add_parser("model-lab-prepare")
+    prepare.add_argument("--backend",choices=("unsloth","soup"),required=True)
+    prepare.add_argument("--dataset",required=True); prepare.add_argument("--model",required=True)
+    prepare.add_argument("--approve-dataset",action="store_true")
+    run=sub.add_parser("model-lab-run"); run.add_argument("--job",required=True)
+    run.add_argument("--execute",action="store_true"); run.add_argument("--approve-run",action="store_true")
+    dry=sub.add_parser("soup-dry-run"); dry.add_argument("--job",required=True)
     args=parser.parse_args(argv); settings=Settings.from_env(args.env); configure_logging(settings.log_level)
     with AgentRuntime(settings) as runtime:
         return _run(args, runtime)
@@ -43,6 +49,21 @@ def _run(args, runtime) -> int:
     if args.command=="model-fit":
         print(json.dumps(model_fit_report(parameter_billions=args.params, quantization=args.quant, context_tokens=args.context, model=args.model, ollama_base_url=runtime.settings.local_llm_url or "http://127.0.0.1:11434/v1"), indent=2, ensure_ascii=False))
         return 0
+    if args.command=="model-lab-status":
+        print(json.dumps(runtime.model_lab.status().as_dict(), indent=2, ensure_ascii=False))
+        return 0
+    if args.command=="model-lab-prepare":
+        job = runtime.model_lab.prepare(args.backend, args.dataset, args.model, approved_dataset=args.approve_dataset)
+        print(json.dumps(job.as_dict(), indent=2, ensure_ascii=False))
+        return 0
+    if args.command=="model-lab-run":
+        report = runtime.model_lab.run(args.job, approved_run=args.approve_run, execute=args.execute)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0 if report.get("status") not in {"FAILED"} else 2
+    if args.command=="soup-dry-run":
+        report = runtime.model_lab.soup_dry_run(args.job)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0 if report.get("status") in {"OK", "CODE_READY"} else 2
     if args.command=="realtime-check":
         print(json.dumps(realtime_check_report(runtime), indent=2, ensure_ascii=False))
         return 0

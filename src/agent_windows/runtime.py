@@ -10,6 +10,7 @@ from .config import Settings
 from .errors import ProviderUnavailable
 from .hermes_skills import HermesSkillStore, build_hermes_skill_tools
 from .memory import SQLiteMemoryStore
+from .model_lab import ModelLab, build_model_lab_tools
 from .network import NetworkMonitor
 from .needle_integration import NeedleToolPlanner
 from .ponytail import PonytailReviewer, build_ponytail_tools
@@ -79,6 +80,7 @@ class AgentRuntime:
         )
         self.skills = HermesSkillStore(settings.data_dir / "skills")
         self.goals = OpenHumanGoalStore(settings.data_dir / "thread-goal.json")
+        self.model_lab = ModelLab(settings.data_dir / "model-lab")
         tool_list = [
             *build_windows_tools((Path.cwd(), settings.data_dir)),
             *build_web_tools(self.web),
@@ -86,6 +88,7 @@ class AgentRuntime:
             *build_ponytail_tools(self.ponytail),
             *build_hermes_skill_tools(self.skills),
             *build_openhuman_goal_tools(self.goals),
+            *build_model_lab_tools(self.model_lab),
         ]
         self.tools = ToolRegistry(tool_list)
         self.agent = AgentOrchestrator(

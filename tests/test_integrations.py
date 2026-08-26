@@ -15,12 +15,18 @@ class IntegrationMatrixTests(unittest.TestCase):
         }
         self.assertEqual(names, expected)
 
-    def test_python_ports_have_real_execution_paths(self):
+    def test_every_project_has_real_execution_path_and_no_pending_scaffold(self):
+        rows = integration_matrix()
+        for row in rows:
+            with self.subTest(name=row.component):
+                self.assertTrue(row.execution_path)
+                self.assertFalse(row.status.startswith("PENDING"))
+
+    def test_python_ports_and_internal_capabilities_are_active(self):
         by_name = {row.component: row for row in integration_matrix()}
-        for name in ("llmfit", "Ponytail", "OmniRoute", "Prime Agent"):
+        for name in ("llmfit", "Hermes Agent", "OpenHuman", "Ponytail", "OmniRoute", "Prime Agent"):
             with self.subTest(name=name):
                 self.assertEqual(by_name[name].status, "ACTIVE")
-                self.assertTrue(by_name[name].execution_path)
 
 
 if __name__ == "__main__":
