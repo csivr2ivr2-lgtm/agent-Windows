@@ -20,6 +20,7 @@ ai-aharon-livekit = "agent_windows.livekit_runtime:main"
 [project.optional-dependencies]
 dev = ["coverage[toml]>=7.6,<8", "ruff>=0.9,<1"]
 realtime = ["livekit-agents[assemblyai,deepgram,elevenlabs]==1.7.0"]
+needle = ["cactus-needle==2.0.8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

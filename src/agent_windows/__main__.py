@@ -8,6 +8,7 @@ import logging
 
 from .config import Settings
 from .diagnostics import collect, provider_check_report, realtime_check_report, run_llmfit
+from .integrations import integrations_report
 from .logging_utils import configure_logging
 from .model_fit import model_fit_report
 from .runtime import AgentRuntime
@@ -21,6 +22,7 @@ def main(argv=None) -> int:
     sub.add_parser("chat"); sub.add_parser("voice"); sub.add_parser("status")
     doctor=sub.add_parser("doctor"); doctor.add_argument("--llmfit",action="store_true")
     sub.add_parser("benchmark"); sub.add_parser("providers-check"); sub.add_parser("realtime-check")
+    sub.add_parser("integrations-check"); sub.add_parser("routing-check")
     fit=sub.add_parser("model-fit"); fit.add_argument("--params",type=float); fit.add_argument("--quant",default="q4"); fit.add_argument("--context",type=int,default=8192); fit.add_argument("--model",default="candidate")
     args=parser.parse_args(argv); settings=Settings.from_env(args.env); configure_logging(settings.log_level)
     with AgentRuntime(settings) as runtime:
@@ -43,6 +45,13 @@ def _run(args, runtime) -> int:
         return 0
     if args.command=="realtime-check":
         print(json.dumps(realtime_check_report(runtime), indent=2, ensure_ascii=False))
+        return 0
+    if args.command=="integrations-check":
+        report = integrations_report(runtime)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0 if all(not str(item["status"]).startswith("PENDING") for item in report) else 2
+    if args.command=="routing-check":
+        print(json.dumps(runtime.provider_manager.routing_snapshot(), indent=2, ensure_ascii=False))
         return 0
     if args.command=="providers-check":
         report = provider_check_report(runtime)

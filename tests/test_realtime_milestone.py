@@ -14,8 +14,9 @@ def test_current_datetime_tool_exists(tmp_path):
 
 def test_optional_integrations_are_non_blocking():
     rows = integration_matrix()
-    assert len(rows) == 8
-    assert all(row.default_enabled is False for row in rows)
+    assert len(rows) == 15
+    assert any(row.default_enabled is True for row in rows)
+    assert all(row.upstream_url for row in rows)
     assert OptionalBackend("definitely_missing_agent_windows_component").healthy is False
 
 
