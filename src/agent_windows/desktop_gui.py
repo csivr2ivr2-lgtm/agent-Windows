@@ -13,6 +13,7 @@ from pathlib import Path
 from .config import Settings
 from .logging_utils import configure_logging
 from .runtime import AgentRuntime
+from .realtime import LocalRealtimeSession, RealtimeState
 from .service_api import service_chat, service_health
 from .voice_runtime import MicrophoneUnavailable
 
@@ -27,6 +28,7 @@ WM_HOTKEY = 0x0312
 WM_SETICON = 0x0080
 HEBREW_LABELS = {
     "ready": "מוכן",
+    "connecting": "מתחבר",
     "listening": "מקשיב",
     "thinking": "חושב",
     "speaking": "מדבר",
@@ -93,6 +95,8 @@ class AgentDesktopApp:
         self._closing = threading.Event()
         self._call_active = threading.Event()
         self._call_started_at: float | None = None
+        self._realtime_session: LocalRealtimeSession | None = None
+        self._call_thread: threading.Thread | None = None
 
         root.title(APP_NAME)
         root.geometry("470x590")
@@ -183,34 +187,41 @@ class AgentDesktopApp:
             return
         self._call_active.set()
         self._call_started_at = time.monotonic()
-        threading.Thread(target=self._call_loop, daemon=True, name="AiAharonCall").start()
+        self._call_thread = threading.Thread(
+            target=self._call_loop, daemon=True, name="AiAharonCall"
+        )
+        self._call_thread.start()
+
+    def _on_realtime_state(self, state: RealtimeState) -> None:
+        labels = {
+            RealtimeState.CONNECTING: HEBREW_LABELS["connecting"],
+            RealtimeState.LISTENING: HEBREW_LABELS["listening"],
+            RealtimeState.USER_SPEAKING: HEBREW_LABELS["listening"],
+            RealtimeState.THINKING: HEBREW_LABELS["thinking"],
+            RealtimeState.SPEAKING: HEBREW_LABELS["speaking"],
+            RealtimeState.INTERRUPTING: HEBREW_LABELS["listening"],
+            RealtimeState.ERROR: HEBREW_LABELS["error"],
+            RealtimeState.ENDING: HEBREW_LABELS["ready"],
+        }
+        self._set_status(labels[state])
 
     def _call_loop(self) -> None:
-        while self._call_active.is_set() and not self._closing.is_set():
-            try:
-                self._set_status(HEBREW_LABELS["listening"])
-                text = self.runtime.voice.listen().strip()
-                if not text:
-                    continue
-                self._set_status(HEBREW_LABELS["thinking"])
-                answer = self._answer(text).strip()
-                if not answer:
-                    continue
-                self._set_status(HEBREW_LABELS["speaking"])
-                self.runtime.voice.speak(answer)
-            except MicrophoneUnavailable as exc:
-                detail = str(exc).lower()
-                if "no speech detected" in detail or "no microphone audio captured" in detail:
-                    continue
-                LOGGER.warning("Microphone unavailable: %s", exc)
-                self._set_status(HEBREW_LABELS["error"])
-                if self._closing.wait(1.5):
-                    break
-            except Exception:
-                LOGGER.exception("Continuous voice interaction failed")
-                self._set_status(HEBREW_LABELS["error"])
-                if self._closing.wait(1.5):
-                    break
+        try:
+            self._realtime_session = LocalRealtimeSession(
+                self.runtime, status_callback=self._on_realtime_state
+            )
+            self._realtime_session.run(
+                lambda: self._call_active.is_set() and not self._closing.is_set()
+            )
+        except MicrophoneUnavailable as exc:
+            LOGGER.warning("Microphone unavailable: %s", exc)
+            self._set_status(HEBREW_LABELS["error"])
+        except Exception:
+            LOGGER.exception("Realtime voice interaction failed")
+            self._set_status(HEBREW_LABELS["error"])
+        finally:
+            self._realtime_session = None
+            self._call_active.clear()
 
     def _tick_timer(self) -> None:
         if self._closing.is_set():
