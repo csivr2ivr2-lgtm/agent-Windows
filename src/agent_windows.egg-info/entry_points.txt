@@ -1,0 +1,3 @@
+[console_scripts]
+agent-windows = agent_windows.__main__:main
+ai-aharon-livekit = agent_windows.livekit_runtime:main
