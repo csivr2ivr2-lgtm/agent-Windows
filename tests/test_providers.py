@@ -96,3 +96,10 @@ class ProviderAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_deprecated_provider_models_are_migrated():
+    groq = GroqProvider(api_key="test", model="llama-3.1-8b-instant", transport=MockTransport(response(200)))
+    gemini = GeminiProvider(api_key="test", model="gemini-2.0-flash", transport=MockTransport(response(200)))
+    assert groq.model == "openai/gpt-oss-20b"
+    assert gemini.model == "gemini-3.7-flash"

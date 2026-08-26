@@ -10,12 +10,21 @@ from ..http import HTTPTransport, UrllibTransport
 from .base import validate_response
 
 
+_DEPRECATED_GEMINI_MODELS = {
+    "gemini-2.0-flash": "gemini-3.7-flash",
+    "gemini-2.0-flash-lite": "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
+    "gemini-3-pro-preview": "gemini-3.1-pro-preview",
+}
+
+
 class GeminiProvider:
     name = "gemini"
 
     def __init__(self, *, api_key: str, model: str, transport: HTTPTransport | None = None, timeout: float = 30.0) -> None:
         self.api_key = api_key.strip()
-        self.model = model.strip()
+        requested = model.strip()
+        self.model = _DEPRECATED_GEMINI_MODELS.get(requested, requested or "gemini-3.7-flash")
         self.transport = transport or UrllibTransport()
         self.timeout = timeout
 
