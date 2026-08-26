@@ -18,6 +18,7 @@ from .speech import AssemblyAISTT, DeepgramSTT, ElevenLabsTTS, STTManager
 from .streaming_stt import AssemblyAIStreamingSTT, DeepgramStreamingSTT, StreamingSTTManager
 from .tools import ToolRegistry
 from .voice_runtime import FFmpegMicrophone, VoiceService
+from .web_tools import FirecrawlAdapter, WebRouter, WigoloAdapter, build_web_tools
 from .windows_tools import build_windows_tools
 
 
@@ -38,7 +39,15 @@ class AgentRuntime:
             max_attempts=settings.llm_attempts,base_delay=settings.retry_base,max_delay=settings.retry_max,
             transient_cooldown=settings.transient_cooldown,rate_limit_cooldown=settings.rate_cooldown,
             auth_cooldown=settings.auth_cooldown), network_monitor=self.network)
-        self.tools = ToolRegistry(build_windows_tools((Path.cwd(), settings.data_dir)))
+        self.web = WebRouter(
+            WigoloAdapter(settings.wigolo_url, settings.wigolo_token),
+            FirecrawlAdapter(settings.firecrawl_key, settings.firecrawl_url),
+        )
+        tool_list = [
+            *build_windows_tools((Path.cwd(), settings.data_dir)),
+            *build_web_tools(self.web),
+        ]
+        self.tools = ToolRegistry(tool_list)
         self.agent = AgentOrchestrator(LLMRouter(self.provider_manager), self.memory, self.tools,
                                        policy_provider=self.network.policy)
         stt_by_name = {"assemblyai": AssemblyAISTT(settings.assemblyai_key), "deepgram": DeepgramSTT(settings.deepgram_key)}

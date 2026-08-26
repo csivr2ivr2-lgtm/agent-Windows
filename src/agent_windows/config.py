@@ -66,6 +66,10 @@ class Settings:
     livekit_api_secret: str = ""
     realtime_backend: str = "auto"
     livekit_agent_name: str = "ai-aharon"
+    wigolo_url: str = "http://127.0.0.1:3333"
+    wigolo_token: str = ""
+    firecrawl_key: str = ""
+    firecrawl_url: str = "https://api.firecrawl.dev"
 
     @classmethod
     def from_env(cls, dotenv: str | Path = ".env") -> "Settings":
@@ -91,4 +95,7 @@ class Settings:
             os.getenv("LIVEKIT_URL", ""), os.getenv("LIVEKIT_API_KEY", ""),
             os.getenv("LIVEKIT_API_SECRET", ""), os.getenv("AGENT_REALTIME_BACKEND", "auto"),
             os.getenv("LIVEKIT_AGENT_NAME", "ai-aharon"),
+            os.getenv("WIGOLO_BASE_URL", "http://127.0.0.1:3333"),
+            os.getenv("WIGOLO_TOKEN", ""), os.getenv("FIRECRAWL_API_KEY", ""),
+            os.getenv("FIRECRAWL_BASE_URL", "https://api.firecrawl.dev"),
         )
