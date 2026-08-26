@@ -47,15 +47,16 @@ Push-Location $Root
 try {
     Stop-AgentCompanions
 
+    # The Windows service starts automatically. The voice client opens manually,
+    # so the microphone never activates just because the user signed in.
     $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    $runCommand = '"{0}" -m agent_windows.desktop_gui --env "{1}" --minimized' -f $UserPythonw, $EnvFile
-    New-Item -Path $runKey -Force | Out-Null
-    New-ItemProperty -Path $runKey -Name 'AgentWindowsSession' -Value $runCommand -PropertyType String -Force | Out-Null
+    Remove-ItemProperty -Path $runKey -Name 'AgentWindowsSession' -ErrorAction SilentlyContinue
 
     $desktop = [Environment]::GetFolderPath('Desktop')
     $oldShortcutPath = Join-Path $desktop 'Agent Windows AI.lnk'
     Remove-Item -Path $oldShortcutPath -Force -ErrorAction SilentlyContinue
     $shortcutPath = Join-Path $desktop 'ai aharon.lnk'
+    Remove-Item -Path $shortcutPath -Force -ErrorAction SilentlyContinue
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = $UserPythonw
@@ -72,8 +73,9 @@ try {
     Write-Host ''
     Write-Host 'ai aharon installed.' -ForegroundColor Green
     Write-Host "Desktop shortcut: $shortcutPath"
-    Write-Host 'It will start minimized automatically when you sign in.'
-    Write-Host 'Ctrl+Alt+Space still starts voice input.'
+    Write-Host 'Opening ai aharon starts a continuous voice call immediately.'
+    Write-Host 'The Windows service still starts automatically with Windows.'
+    Write-Host 'No push-to-talk button is used.'
 }
 finally {
     Pop-Location
