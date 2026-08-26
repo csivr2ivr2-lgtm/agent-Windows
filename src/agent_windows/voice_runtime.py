@@ -44,6 +44,43 @@ class FFmpegMicrophone:
     def __init__(self, device="default", *, ffmpeg="ffmpeg", max_seconds=30, start_timeout=8):
         self.device, self.ffmpeg, self.max_seconds, self.start_timeout = device, ffmpeg, max_seconds, start_timeout
 
+    def iter_pcm_utterance(self, vad: EnergyVAD):
+        if shutil.which(self.ffmpeg) is None: raise MicrophoneUnavailable("FFmpeg is not installed or not on PATH")
+        if not __import__("sys").platform.startswith("win"): raise MicrophoneUnavailable("voice capture requires Windows")
+        command = [self.ffmpeg,"-hide_banner","-loglevel","error","-f","dshow","-i",f"audio={self.device}",
+                   "-ac","1","-ar","16000","-f","s16le","pipe:1"]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            **hidden_subprocess_kwargs(),
+        )
+        started = speech_seen = False
+        started_at = time.monotonic()
+        try:
+            while time.monotonic() - started_at < self.max_seconds:
+                frame = process.stdout.read(1600) if process.stdout else b""  # 50 ms PCM16 @ 16 kHz mono
+                if len(frame) < 1600:
+                    break
+                result = vad.process(frame, timestamp_ms=int((time.monotonic()-started_at)*1000))
+                if result.utterance_started:
+                    started = speech_seen = True
+                if started:
+                    yield frame
+                if result.utterance_ended:
+                    break
+                if not speech_seen and time.monotonic() - started_at > self.start_timeout:
+                    raise MicrophoneUnavailable("no speech detected")
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        if not speech_seen:
+            raise MicrophoneUnavailable("no microphone audio captured")
+
     def capture_pcm_utterance(self, target: Path, vad: EnergyVAD) -> None:
         if shutil.which(self.ffmpeg) is None: raise MicrophoneUnavailable("FFmpeg is not installed or not on PATH")
         if not __import__("sys").platform.startswith("win"): raise MicrophoneUnavailable("voice capture requires Windows")
@@ -92,6 +129,9 @@ class VoiceService:
         supported = capabilities & (relay_codecs | stt_codecs)
         profile = profile_for(state, supported)
         vad = EnergyVAD(threshold=profile.vad_threshold, silence_ms=profile.vad_silence_ms)
+        if state is not NetworkState.OFFLINE and self.direct_allowed and hasattr(self.stt, "transcribe_stream"):
+            frames = self.microphone.iter_pcm_utterance(vad)
+            return self.stt.transcribe_stream(frames, sample_rate=16000, language="he")
         with tempfile.TemporaryDirectory() as directory:
             pcm, encoded = Path(directory)/"utterance.pcm", Path(directory)/"utterance.audio"
             self.microphone.capture_pcm_utterance(pcm, vad)

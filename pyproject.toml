@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "pywin32==312; platform_system == 'Windows'",
+  "websocket-client==1.9.0",
 ]
 
 [project.scripts]
