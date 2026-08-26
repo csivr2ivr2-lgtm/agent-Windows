@@ -1,13 +1,20 @@
 $ErrorActionPreference = 'Stop'
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$Python = Join-Path $Root '.venv\Scripts\python.exe'
-$Pythonw = Join-Path $Root '.venv\Scripts\pythonw.exe'
+$UserPython = Join-Path $Root '.venv\Scripts\python.exe'
+$UserPythonw = Join-Path $Root '.venv\Scripts\pythonw.exe'
 $EnvFile = Join-Path $Root '.env'
 $ServiceName = 'AgentWindowsAI'
 
-if (-not (Test-Path $Python)) {
-    throw "Virtual environment not found: $Python. Run scripts\setup.ps1 first."
+$ServiceRoot = Join-Path $env:ProgramData 'AgentWindowsAI'
+$RuntimeRoot = Join-Path $ServiceRoot 'python-runtime'
+$ServiceVenv = Join-Path $ServiceRoot '.venv'
+$ServicePython = Join-Path $ServiceVenv 'Scripts\python.exe'
+$ServiceEnv = Join-Path $ServiceRoot '.env'
+$ServiceData = Join-Path $ServiceRoot 'data'
+
+if (-not (Test-Path $UserPython)) {
+    throw "Virtual environment not found: $UserPython. Run scripts\setup.ps1 first."
 }
 if (-not (Test-Path $EnvFile)) {
     throw ".env not found: $EnvFile"
@@ -19,27 +26,114 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw 'Run this PowerShell script as Administrator.'
 }
 
+function Set-ServiceRootAcl {
+    param([string]$Path)
+
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $adminsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+
+    $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $rights = [Security.AccessControl.FileSystemRights]::FullControl
+
+    foreach ($sid in @($systemSid, $adminsSid, $currentSid)) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid, $rights, $inherit, $propagation, $allow
+        )
+        [void]$acl.AddAccessRule($rule)
+    }
+    Set-Acl -Path $Path -AclObject $acl
+}
+
+function Stop-SessionCompanion {
+    Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like '*agent_windows.session_agent*' } |
+        ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+}
+
 Push-Location $Root
 try {
-    # Installs pywin32 on Windows because it is a platform-specific project dependency.
-    & $Python -m pip install -e .
-    if ($LASTEXITCODE -ne 0) { throw 'Python package installation failed.' }
+    Write-Host 'Preparing machine-wide service runtime under ProgramData...'
+
+    New-Item -ItemType Directory -Path $ServiceRoot -Force | Out-Null
+    Set-ServiceRootAcl -Path $ServiceRoot
+
+    Stop-SessionCompanion
 
     $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($null -eq $existing) {
-        & $Python -m agent_windows.windows_service --startup auto install
-    } else {
+    if ($null -ne $existing) {
         if ($existing.Status -ne 'Stopped') {
-            Stop-Service -Name $ServiceName -Force -ErrorAction Stop
-            $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
+            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+            try { $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15)) } catch {}
         }
-        & $Python -m agent_windows.windows_service --startup auto update
+        & sc.exe delete $ServiceName | Out-Null
+        for ($i = 0; $i -lt 30; $i++) {
+            if ($null -eq (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 500
+        }
     }
-    if ($LASTEXITCODE -ne 0) { throw 'Windows service installation/update failed.' }
 
-    # pywin32's service host imports this exact class path from the registry.
-    # Verify registration before asking SCM to start the service so a broken
-    # __main__/file-path registration fails fast instead of timing out (1053).
+    if (-not (Test-Path (Join-Path $RuntimeRoot 'python.exe'))) {
+        $BasePython = (& $UserPython -c "import sys; print(sys.base_prefix)").Trim()
+        if (-not (Test-Path (Join-Path $BasePython 'python.exe'))) {
+            throw "Could not locate base Python installation: $BasePython"
+        }
+
+        New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
+        Write-Host "Copying Python runtime from $BasePython ..."
+        & robocopy.exe $BasePython $RuntimeRoot /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
+        $robocopyExit = $LASTEXITCODE
+        if ($robocopyExit -ge 8) {
+            throw "Copying Python runtime failed (robocopy exit $robocopyExit)."
+        }
+    }
+
+    $MachinePython = Join-Path $RuntimeRoot 'python.exe'
+    if (-not (Test-Path $MachinePython)) {
+        throw "Machine Python runtime is missing: $MachinePython"
+    }
+
+    if (-not (Test-Path $ServicePython)) {
+        Write-Host 'Creating service virtual environment...'
+        & $MachinePython -m venv $ServiceVenv
+        if ($LASTEXITCODE -ne 0) { throw 'Creating service virtual environment failed.' }
+    }
+
+    Write-Host 'Installing service dependencies...'
+    & $ServicePython -m pip install --disable-pip-version-check "pywin32==312"
+    if ($LASTEXITCODE -ne 0) { throw 'Installing pywin32 into service runtime failed.' }
+
+    Write-Host 'Installing current Agent Windows build into service runtime...'
+    & $ServicePython -m pip install --disable-pip-version-check --force-reinstall --no-deps $Root
+    if ($LASTEXITCODE -ne 0) { throw 'Installing Agent Windows into service runtime failed.' }
+
+    Copy-Item -Path $EnvFile -Destination $ServiceEnv -Force
+
+    New-Item -ItemType Directory -Path $ServiceData -Force | Out-Null
+
+    $OldData = Join-Path $Root 'data'
+    if (Test-Path $OldData) {
+        & robocopy.exe $OldData $ServiceData /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
+        $robocopyExit = $LASTEXITCODE
+        if ($robocopyExit -ge 8) {
+            throw "Copying Agent data failed (robocopy exit $robocopyExit)."
+        }
+    }
+    Remove-Item -Path (Join-Path $ServiceData 'service.token') -Force -ErrorAction SilentlyContinue
+
+    Set-ServiceRootAcl -Path $ServiceRoot
+
+    Write-Host 'Installing Windows service from machine runtime...'
+    & $ServicePython -m agent_windows.windows_service --startup auto install
+    if ($LASTEXITCODE -ne 0) { throw 'Windows service installation failed.' }
+
     $pythonClassKey = "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\$ServiceName\PythonClass"
     $expectedPythonClass = 'agent_windows.windows_service.AgentWindowsService'
     if (-not (Test-Path $pythonClassKey)) {
@@ -50,38 +144,47 @@ try {
         throw "Invalid pywin32 PythonClass registration: '$registeredPythonClass' (expected '$expectedPythonClass')."
     }
 
-    # Start through the Service Control Manager and verify the actual state.
+    $serviceConfig = & sc.exe qc $ServiceName
+    if (($serviceConfig -join "`n") -notmatch [regex]::Escape($ServiceRoot)) {
+        throw "Service executable was not registered under ProgramData."
+    }
+
     Start-Service -Name $ServiceName -ErrorAction Stop
     $service = Get-Service -Name $ServiceName
-    $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
+    $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(25))
     $service.Refresh()
     if ($service.Status -ne 'Running') {
         throw "Windows service did not reach Running state (current: $($service.Status))."
     }
 
-    # Ask Windows to restart the service after unexpected crashes.
+    $tokenPath = Join-Path $ServiceData 'service.token'
+    for ($i = 0; $i -lt 40 -and -not (Test-Path $tokenPath); $i++) {
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not (Test-Path $tokenPath)) {
+        throw "Service reached Running but did not create $tokenPath."
+    }
+
     & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/15000/""/0 | Out-Null
 
     $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    $runCommand = '"{0}" -m agent_windows.session_agent --env "{1}"' -f $Pythonw, $EnvFile
+    $runCommand = '"{0}" -m agent_windows.session_agent --env "{1}"' -f $UserPythonw, $EnvFile
     New-Item -Path $runKey -Force | Out-Null
     New-ItemProperty -Path $runKey -Name 'AgentWindowsSession' -Value $runCommand -PropertyType String -Force | Out-Null
 
-    # Start the per-user audio companion now. Windows services run in Session 0 and
-    # cannot safely own the logged-in user's microphone/speakers.
-    $alreadyRunning = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like '*agent_windows.session_agent*' }
-    if (-not $alreadyRunning) {
-        Start-Process -FilePath $Pythonw -ArgumentList @('-m','agent_windows.session_agent','--env',$EnvFile) -WorkingDirectory $Root
-    }
+    Start-Process -FilePath $UserPythonw `
+        -ArgumentList @('-m','agent_windows.session_agent','--env',$EnvFile) `
+        -WorkingDirectory $Root
 
     Start-Sleep -Seconds 2
+
     Write-Host ''
     Write-Host 'Agent Windows service installed and running.' -ForegroundColor Green
     Write-Host "Service: $ServiceName (Automatic / Running)"
+    Write-Host "Service runtime: $ServiceRoot"
     Write-Host 'Voice companion: starts automatically when you sign in.'
     Write-Host 'Press Ctrl+Alt+Space, then speak.'
-    Write-Host "Log: $(Join-Path $Root 'data\session-agent.log')"
+    Write-Host "Log: $(Join-Path $OldData 'session-agent.log')"
 }
 finally {
     Pop-Location

@@ -14,6 +14,17 @@ def _project_root() -> Path:
     configured = os.getenv("AGENT_WINDOWS_HOME", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
+
+    # A real Windows service runs as LocalSystem and should not depend on a
+    # per-user profile/virtualenv. The installer places the service runtime
+    # under ProgramData and copies its .env there.
+    program_data = os.getenv("PROGRAMDATA", "").strip()
+    if program_data:
+        machine_root = Path(program_data) / "AgentWindowsAI"
+        if (machine_root / ".env").is_file():
+            return machine_root.resolve()
+
+    # Developer / CLI fallback.
     return Path(__file__).resolve().parents[2]
 
 

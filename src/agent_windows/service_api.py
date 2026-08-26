@@ -15,6 +15,27 @@ DEFAULT_PORT = 8765
 MAX_REQUEST_BYTES = 64 * 1024
 
 
+def _service_data_dir(data_dir: Path) -> Path:
+    """Resolve the machine service data directory for user-session clients.
+
+    The Windows service is installed under ProgramData so LocalSystem does not
+    need access to the signed-in user's profile. Session clients still pass
+    their normal Settings.data_dir; when the machine service token exists we
+    transparently use the ProgramData token instead.
+    """
+    override = os.getenv("AGENT_SERVICE_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    program_data = os.getenv("PROGRAMDATA", "").strip()
+    if program_data:
+        machine_data = Path(program_data) / "AgentWindowsAI" / "data"
+        if (machine_data / "service.token").is_file():
+            return machine_data
+
+    return Path(data_dir)
+
+
 def _service_port() -> int:
     try:
         port = int(os.getenv("AGENT_SERVICE_PORT", str(DEFAULT_PORT)))
@@ -44,7 +65,7 @@ def ensure_token(data_dir: Path) -> str:
 
 
 def read_token(data_dir: Path) -> str:
-    path = token_path(data_dir)
+    path = token_path(_service_data_dir(data_dir))
     if not path.exists():
         raise RuntimeError("Agent Windows service token does not exist; install/start the service first")
     token = path.read_text(encoding="utf-8").strip()
