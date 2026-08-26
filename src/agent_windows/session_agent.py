@@ -22,11 +22,14 @@ VK_SPACE = 0x20
 WM_HOTKEY = 0x0312
 
 
-def _configure_file_logging(data_dir: Path) -> None:
+def _configure_file_logging(data_dir: Path) -> logging.FileHandler:
     data_dir.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(data_dir / "session-agent.log", encoding="utf-8")
+    log_path = data_dir / "session-agent.log"
+    log_path.touch(exist_ok=True)
+    handler = logging.FileHandler(log_path, encoding="utf-8", delay=True)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logging.getLogger().addHandler(handler)
+    return handler
 
 
 def _register_hotkey() -> None:
@@ -77,14 +80,18 @@ def main(argv=None) -> int:
     os.chdir(env_path.parent)
     settings = Settings.from_env(env_path)
     configure_logging(settings.log_level)
-    _configure_file_logging(settings.data_dir)
-    _register_hotkey()
+    file_handler = _configure_file_logging(settings.data_dir)
     try:
-        with AgentRuntime(settings) as runtime:
-            _message_loop(runtime, settings)
+        _register_hotkey()
+        try:
+            with AgentRuntime(settings) as runtime:
+                _message_loop(runtime, settings)
+        finally:
+            _unregister_hotkey()
+        return 0
     finally:
-        _unregister_hotkey()
-    return 0
+        logging.getLogger().removeHandler(file_handler)
+        file_handler.close()
 
 
 if __name__ == "__main__":

@@ -45,9 +45,10 @@ class ServiceApiEdgeTests(unittest.TestCase):
             new_token = service_api.ensure_token(root / "data")
             self.assertTrue(new_token)
             path.unlink()
-            with self.assertRaises(RuntimeError): service_api.read_token(root / "data")
-            path.write_text("\n", encoding="utf-8")
-            with self.assertRaises(RuntimeError): service_api.read_token(root / "data")
+            with mock.patch.dict(os.environ, {"AGENT_SERVICE_DATA_DIR": "", "PROGRAMDATA": ""}, clear=False):
+                with self.assertRaises(RuntimeError): service_api.read_token(root / "data")
+                path.write_text("\n", encoding="utf-8")
+                with self.assertRaises(RuntimeError): service_api.read_token(root / "data")
 
     def _server(self, runtime):
         tmp = tempfile.TemporaryDirectory()

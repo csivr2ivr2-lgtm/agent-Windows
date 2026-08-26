@@ -32,7 +32,7 @@ class LocalTtsTests(unittest.TestCase):
         which.side_effect = lambda name: None if name == "ffplay" else r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
         popen.return_value = _Process()
         started = []
-        with mock.patch("agent_windows.voice_runtime.sys.platform", "win32"):
+        with mock.patch("sys.platform", "win32"):
             self.service().speak("שלום; $(Remove-Item C:\\*)", on_audio_start=lambda: started.append(True))
         command = popen.call_args.args[0]
         self.assertIn("-LiteralPath $args[0]", command)
@@ -48,7 +48,7 @@ class LocalTtsTests(unittest.TestCase):
         popen.return_value = process
         cancelled = threading.Event()
         cancelled.set()
-        with mock.patch("agent_windows.voice_runtime.sys.platform", "win32"):
+        with mock.patch("sys.platform", "win32"):
             self.assertFalse(self.service()._speak_local_sapi("text", cancel_event=cancelled))
         popen.assert_not_called()
 

@@ -1,6 +1,7 @@
 import base64
 from pathlib import Path
 import importlib
+import subprocess
 import unittest
 
 from agent_windows.orchestrator import DEFAULT_SYSTEM_PROMPT
@@ -30,19 +31,28 @@ class GuiPolishTests(unittest.TestCase):
         self.assertEqual(hidden_subprocess_kwargs(os_name="posix"), {})
 
     def test_installers_use_pythonw_new_shortcut_and_icon(self):
-        for script_name in ("install-gui.ps1", "install-service.ps1"):
-            script = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
-            self.assertIn("pythonw.exe", script)
-            self.assertIn("ai aharon.lnk", script)
-            self.assertIn("ai-aharon.ico", script)
-            self.assertIn("$shortcut.IconLocation", script)
-            if script_name == "install-service.ps1":
-                self.assertIn("$ServiceName = 'AgentWindowsAI'", script)
+        gui_script = (ROOT / "scripts" / "install-gui.ps1").read_text(encoding="utf-8")
+        self.assertIn("pythonw.exe", gui_script)
+        self.assertIn("ai aharon.lnk", gui_script)
+        self.assertIn("ai-aharon.ico", gui_script)
+        self.assertIn("$shortcut.IconLocation", gui_script)
+
+        service_script = (ROOT / "scripts" / "install-service.ps1").read_text(encoding="utf-8")
+        self.assertIn("ai-aharon.ico", service_script)
+        self.assertIn("$ServiceName = 'AgentWindowsAI'", service_script)
+        self.assertNotIn("CreateShortcut", service_script)
 
     def test_icon_is_stored_as_valid_base64_not_committed_binary(self):
         icon = ROOT / "assets" / "ai-aharon.ico"
         encoded_icon = ROOT / "assets" / "ai-aharon.ico.b64"
-        self.assertFalse(icon.exists())
+        tracked = subprocess.run(
+            ["git", "ls-files", "--", str(icon.relative_to(ROOT))],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(tracked, "")
         decoded = base64.b64decode(
             encoded_icon.read_text(encoding="ascii").strip(), validate=True
         )

@@ -273,11 +273,14 @@ class AgentDesktopApp:
         self.root.destroy()
 
 
-def _configure_file_logging(data_dir: Path) -> None:
+def _configure_file_logging(data_dir: Path) -> logging.FileHandler:
     data_dir.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(data_dir / "desktop-gui.log", encoding="utf-8")
+    log_path = data_dir / "desktop-gui.log"
+    log_path.touch(exist_ok=True)
+    handler = logging.FileHandler(log_path, encoding="utf-8", delay=True)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logging.getLogger().addHandler(handler)
+    return handler
 
 
 def main(argv=None) -> int:
@@ -292,17 +295,21 @@ def main(argv=None) -> int:
     os.chdir(env_path.parent)
     settings = Settings.from_env(env_path)
     configure_logging(settings.log_level)
-    _configure_file_logging(settings.data_dir)
-    _set_windows_app_identity()
+    file_handler = _configure_file_logging(settings.data_dir)
+    try:
+        _set_windows_app_identity()
 
-    import tkinter as tk
-    root = tk.Tk()
-    runtime = AgentRuntime(settings)
-    AgentDesktopApp(root, runtime, settings, auto_start=not args.minimized)
-    if args.minimized:
-        root.after(200, root.iconify)
-    root.mainloop()
-    return 0
+        import tkinter as tk
+        root = tk.Tk()
+        runtime = AgentRuntime(settings)
+        AgentDesktopApp(root, runtime, settings, auto_start=not args.minimized)
+        if args.minimized:
+            root.after(200, root.iconify)
+        root.mainloop()
+        return 0
+    finally:
+        logging.getLogger().removeHandler(file_handler)
+        file_handler.close()
 
 
 if __name__ == "__main__":
