@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -29,6 +30,32 @@ def _float(name: str, default: float) -> float:
         return float(os.getenv(name, default))
     except ValueError:
         return default
+
+
+def _bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _json_float_map(name: str) -> dict[str, float]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, item in value.items():
+        try:
+            result[str(key)] = float(item)
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
 @dataclass(frozen=True)
@@ -76,6 +103,13 @@ class Settings:
     openviking_url: str = ""
     openviking_api_key: str = ""
     openviking_session_id: str = "ai-aharon"
+    routing_strategy: str = "auto"
+    provider_costs: dict[str, float] = field(default_factory=dict)
+    provider_quota_headroom: dict[str, float] = field(default_factory=dict)
+    needle_enabled: bool = True
+    needle_confidence_threshold: float = 0.70
+    needle_weights: str = ""
+    ponytail_complexity_threshold: int = 4
 
     @classmethod
     def from_env(cls, dotenv: str | Path = ".env") -> "Settings":
@@ -108,4 +142,11 @@ class Settings:
             os.getenv("WINDOWS_USE_MODEL", "") or os.getenv("LOCAL_LLM_MODEL", ""),
             os.getenv("OPENVIKING_URL", ""), os.getenv("OPENVIKING_API_KEY", ""),
             os.getenv("OPENVIKING_SESSION_ID", "ai-aharon"),
+            os.getenv("AGENT_ROUTING_STRATEGY", "auto"),
+            _json_float_map("AGENT_PROVIDER_COSTS_JSON"),
+            _json_float_map("AGENT_PROVIDER_QUOTA_HEADROOM_JSON"),
+            _bool("AGENT_NEEDLE_ENABLED", True),
+            _float("AGENT_NEEDLE_CONFIDENCE_THRESHOLD", 0.70),
+            os.getenv("NEEDLE_WEIGHTS", ""),
+            _int("AGENT_PONYTAIL_COMPLEXITY_THRESHOLD", 4),
         )

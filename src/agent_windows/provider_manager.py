@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from .contracts import LLMProvider, LLMResponse, LLMStreamEvent, Message
+from .omniroute_policy import OmniRoutePolicy
 from .errors import (
     ProviderAuthenticationError,
     ProviderConnectionError,
@@ -36,6 +37,10 @@ class ProviderHealth:
     consecutive_failures: int = 0
     cooldown_until: float = 0.0
     last_error: str | None = None
+    latency_ema_ms: float | None = None
+    successes: int = 0
+    failures: int = 0
+    last_success_at: float | None = None
 
 
 class ProviderManager:
@@ -49,6 +54,9 @@ class ProviderManager:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         network_monitor=None,
+        routing_strategy: str = "priority",
+        provider_costs: Mapping[str, float] | None = None,
+        provider_quota_headroom: Mapping[str, float] | None = None,
     ) -> None:
         self.providers = tuple(providers)
         names = [provider.name for provider in providers]
@@ -59,6 +67,10 @@ class ProviderManager:
         self._sleep = sleep
         self.network_monitor = network_monitor
         self.health = {provider.name: ProviderHealth() for provider in providers}
+        self.route_policy = OmniRoutePolicy(
+            routing_strategy, costs=provider_costs, quota_headroom=provider_quota_headroom
+        )
+        self.last_good_provider: str | None = None
 
     def apply_network_policy(self, policy: Mapping[str, Any]) -> None:
         self.retry_policy = RetryPolicy(
@@ -74,8 +86,14 @@ class ProviderManager:
                 provider.timeout = float(policy.get("timeout", provider.timeout))
 
     def _ordered_providers(self):
-        providers = self.providers
-        if self.network_monitor and self.network_monitor.state.value == "POOR":
+        network_state = self.network_monitor.state.value if self.network_monitor else "GOOD"
+        providers = self.route_policy.order(
+            self.providers,
+            self.health,
+            network_state=network_state,
+            last_good=self.last_good_provider,
+        )
+        if self.route_policy.strategy == "priority" and network_state == "POOR":
             providers = tuple(sorted(providers, key=lambda provider: provider.name != "local"))
         return providers
 
@@ -99,9 +117,10 @@ class ProviderManager:
             try:
                 started = self._clock()
                 response = self._attempt(provider, messages, tools)
+                latency_ms = (self._clock() - started) * 1000
                 if self.network_monitor:
-                    self.network_monitor.record(latency_ms=(self._clock() - started) * 1000, success=True)
-                self._mark_success(state)
+                    self.network_monitor.record(latency_ms=latency_ms, success=True)
+                self._mark_success(provider.name, state, latency_ms)
                 return response
             except ProviderError as exc:
                 if self.network_monitor:
@@ -158,9 +177,10 @@ class ProviderManager:
                     emitted = True
                     yield event
 
+                latency_ms = (self._clock() - started) * 1000
                 if self.network_monitor:
-                    self.network_monitor.record(latency_ms=(self._clock() - started) * 1000, success=True)
-                self._mark_success(state)
+                    self.network_monitor.record(latency_ms=latency_ms, success=True)
+                self._mark_success(provider.name, state, latency_ms)
                 return
             except ProviderError as exc:
                 if self.network_monitor:
@@ -181,12 +201,40 @@ class ProviderManager:
             if event.kind == "text" and event.text:
                 yield event.text
 
-    @staticmethod
-    def _mark_success(state: ProviderHealth) -> None:
+    def _mark_success(self, provider_name: str, state: ProviderHealth, latency_ms: float) -> None:
         state.healthy = True
         state.consecutive_failures = 0
         state.cooldown_until = 0.0
         state.last_error = None
+        state.successes += 1
+        state.last_success_at = self._clock()
+        measured = max(0.0, float(latency_ms))
+        state.latency_ema_ms = (
+            measured
+            if state.latency_ema_ms is None
+            else (state.latency_ema_ms * 0.7) + (measured * 0.3)
+        )
+        self.last_good_provider = provider_name
+
+    def routing_snapshot(self) -> list[dict[str, object]]:
+        network_state = self.network_monitor.state.value if self.network_monitor else "GOOD"
+        ordered = self._ordered_providers()
+        rank = {provider.name: index for index, provider in enumerate(ordered)}
+        return [
+            {
+                "provider": provider.name,
+                "rank": rank[provider.name],
+                "healthy": self.health[provider.name].healthy,
+                "latency_ema_ms": self.health[provider.name].latency_ema_ms,
+                "successes": self.health[provider.name].successes,
+                "failures": self.health[provider.name].failures,
+                "cooldown_until": self.health[provider.name].cooldown_until,
+                "last_good": provider.name == self.last_good_provider,
+                "network_state": network_state,
+                "strategy": self.route_policy.strategy,
+            }
+            for provider in ordered
+        ]
 
     def _attempt(self, provider, messages, tools) -> LLMResponse:
         policy = self.retry_policy
@@ -209,6 +257,7 @@ class ProviderManager:
         policy = self.retry_policy
         state.healthy = False
         state.consecutive_failures += 1
+        state.failures += 1
         state.last_error = str(exc)
         if isinstance(exc, ProviderRateLimited):
             cooldown = exc.retry_after if exc.retry_after is not None else policy.rate_limit_cooldown
