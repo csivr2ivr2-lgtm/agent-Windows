@@ -274,19 +274,55 @@ class DeepgramStreamingSTT:
         return DeepgramStreamingSession(connection)
 
 
-class StreamingSTTManager:
-    """Opens exactly one streaming provider at a time, in configured order."""
+class ManagedStreamingSTTSession:
+    """Thread-safe sequential STT failover for one long-lived call.
 
-    def __init__(self, providers):
+    Exactly one provider connection is active at a time. A transient connection/server
+    failure gets one bounded reconnect on the same provider before advancing to the next
+    configured provider. Authentication, permission and rate-limit failures skip directly
+    to the fallback provider.
+    """
+
+    def __init__(
+        self,
+        providers,
+        *,
+        language: str,
+        sample_rate: int,
+        max_reconnects_per_provider: int = 1,
+    ) -> None:
+        import threading
+
         self.providers = tuple(providers)
+        self.language = language
+        self.sample_rate = sample_rate
+        self.max_reconnects_per_provider = max(0, max_reconnects_per_provider)
+        self._state_lock = threading.Lock()
+        self._reconnect_lock = threading.Lock()
+        self._provider_index = -1
+        self._reconnects: dict[int, int] = {}
+        self._session = None
+        self._closed = False
+        self._open_initial()
 
-    def open(self, *, language: str = "he", sample_rate: int = 16000):
+    @property
+    def provider(self) -> str:
+        with self._state_lock:
+            session = self._session
+        return str(getattr(session, "provider", "unknown"))
+
+    def _available_indices(self):
+        return [index for index, provider in enumerate(self.providers) if provider.is_available()]
+
+    def _open_provider(self, index: int):
+        provider = self.providers[index]
+        return provider.open(language=self.language, sample_rate=self.sample_rate)
+
+    def _open_initial(self) -> None:
         failures: list[str] = []
-        for provider in self.providers:
-            if not provider.is_available():
-                continue
+        for index in self._available_indices():
             try:
-                return provider.open(language=language, sample_rate=sample_rate)
+                session = self._open_provider(index)
             except (
                 ProviderAuthenticationError,
                 ProviderConnectionError,
@@ -294,6 +330,135 @@ class StreamingSTTManager:
                 ProviderRateLimited,
                 ProviderServerError,
             ) as exc:
-                failures.append(f"{provider.name}: {exc}")
+                failures.append(f"{self.providers[index].name}: {exc}")
+                continue
+            with self._state_lock:
+                self._provider_index = index
+                self._session = session
+            return
         detail = "; ".join(failures) if failures else "no configured streaming STT provider"
         raise ProviderConnectionError("No streaming STT provider succeeded: " + detail)
+
+    def _snapshot(self):
+        with self._state_lock:
+            return self._session, self._provider_index, self._closed
+
+    def _replace_session(self, failed_session, error: BaseException) -> None:
+        with self._reconnect_lock:
+            current, index, closed = self._snapshot()
+            if closed:
+                raise ProviderConnectionError("streaming STT session is closed")
+            if current is not failed_session:
+                return
+
+            try:
+                failed_session.close()
+            except Exception:
+                pass
+
+            transient = isinstance(error, (ProviderConnectionError, ProviderServerError))
+            attempts = self._reconnects.get(index, 0)
+            candidates: list[int] = []
+            if transient and index >= 0 and attempts < self.max_reconnects_per_provider:
+                self._reconnects[index] = attempts + 1
+                candidates.append(index)
+            candidates.extend(i for i in self._available_indices() if i > index)
+            candidates.extend(i for i in self._available_indices() if i < index)
+
+            failures = [f"{getattr(failed_session, 'provider', 'unknown')}: {error}"]
+            seen: set[int] = set()
+            for candidate in candidates:
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                try:
+                    replacement = self._open_provider(candidate)
+                except (
+                    ProviderAuthenticationError,
+                    ProviderConnectionError,
+                    ProviderPermissionError,
+                    ProviderRateLimited,
+                    ProviderServerError,
+                ) as exc:
+                    failures.append(f"{self.providers[candidate].name}: {exc}")
+                    continue
+                with self._state_lock:
+                    if self._closed:
+                        replacement.close()
+                        raise ProviderConnectionError("streaming STT session is closed")
+                    self._provider_index = candidate
+                    self._session = replacement
+                return
+
+            with self._state_lock:
+                self._session = None
+            raise ProviderConnectionError(
+                "Streaming STT recovery exhausted: " + "; ".join(failures)
+            )
+
+    def send_audio(self, pcm16: bytes) -> None:
+        session, _index, closed = self._snapshot()
+        if closed or session is None:
+            raise ProviderConnectionError("streaming STT session is closed")
+        try:
+            session.send_audio(pcm16)
+        except (ProviderConnectionError, ProviderServerError) as exc:
+            self._replace_session(session, exc)
+            replacement, _index, closed = self._snapshot()
+            if closed or replacement is None:
+                raise ProviderConnectionError("streaming STT session is closed")
+            replacement.send_audio(pcm16)
+
+    def recv_event(self, timeout: float | None = None) -> TranscriptEvent | None:
+        session, _index, closed = self._snapshot()
+        if closed or session is None:
+            raise ProviderConnectionError("streaming STT session is closed")
+        try:
+            return session.recv_event(timeout=timeout)
+        except TimeoutError:
+            raise
+        except (
+            ProviderAuthenticationError,
+            ProviderConnectionError,
+            ProviderPermissionError,
+            ProviderRateLimited,
+            ProviderServerError,
+        ) as exc:
+            self._replace_session(session, exc)
+            return None
+
+    def force_endpoint(self) -> None:
+        session, _index, closed = self._snapshot()
+        if closed or session is None:
+            return
+        try:
+            session.force_endpoint()
+        except (ProviderConnectionError, ProviderServerError) as exc:
+            self._replace_session(session, exc)
+
+    def close(self) -> None:
+        with self._reconnect_lock:
+            with self._state_lock:
+                if self._closed:
+                    return
+                self._closed = True
+                session = self._session
+                self._session = None
+            if session is not None:
+                session.close()
+
+
+class StreamingSTTManager:
+    """Opens one provider at a time and keeps bounded sequential failover active."""
+
+    def __init__(self, providers, *, max_reconnects_per_provider: int = 1):
+        self.providers = tuple(providers)
+        self.max_reconnects_per_provider = max(0, max_reconnects_per_provider)
+
+    def open(self, *, language: str = "he", sample_rate: int = 16000):
+        return ManagedStreamingSTTSession(
+            self.providers,
+            language=language,
+            sample_rate=sample_rate,
+            max_reconnects_per_provider=self.max_reconnects_per_provider,
+        )
