@@ -86,3 +86,22 @@ def test_streaming_stt_manager_replays_primary_audio_to_fallback():
 
     manager = STTManager([Primary(), Fallback()])
     assert manager.transcribe_stream(iter([b"one", b"two", b"three"])) == "recovered"
+
+
+def test_barge_in_monitor_cancels_playback():
+    import threading
+    from agent_windows.voice_runtime import VoiceService
+
+    class Mic:
+        def wait_for_speech(self, _stop_event): return True
+
+    voice = VoiceService(microphone=Mic(), stt=None, tts=None)
+    cancelled = threading.Event()
+    voice.cancel_playback = cancelled.set
+    playback_cancel = threading.Event()
+    monitor_stop = threading.Event()
+    thread = voice._start_barge_in_monitor(playback_cancel, monitor_stop)
+    assert thread is not None
+    thread.join(timeout=1)
+    assert playback_cancel.is_set()
+    assert cancelled.is_set()

@@ -81,6 +81,32 @@ class FFmpegMicrophone:
         if not speech_seen:
             raise MicrophoneUnavailable("no microphone audio captured")
 
+    def wait_for_speech(self, stop_event: threading.Event, *, threshold=900.0, timeout=30.0) -> bool:
+        if shutil.which(self.ffmpeg) is None or not __import__("sys").platform.startswith("win"):
+            return False
+        command = [self.ffmpeg,"-hide_banner","-loglevel","error","-f","dshow","-i",f"audio={self.device}",
+                   "-ac","1","-ar","16000","-f","s16le","pipe:1"]
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **hidden_subprocess_kwargs()
+        )
+        vad = EnergyVAD(threshold=threshold, silence_ms=180)
+        started_at = time.monotonic()
+        try:
+            while not stop_event.is_set() and time.monotonic() - started_at < timeout:
+                frame = process.stdout.read(1600) if process.stdout else b""
+                if len(frame) < 1600:
+                    return False
+                if vad.process(frame, timestamp_ms=int((time.monotonic()-started_at)*1000)).utterance_started:
+                    return True
+            return False
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+
     def capture_pcm_utterance(self, target: Path, vad: EnergyVAD) -> None:
         if shutil.which(self.ffmpeg) is None: raise MicrophoneUnavailable("FFmpeg is not installed or not on PATH")
         if not __import__("sys").platform.startswith("win"): raise MicrophoneUnavailable("voice capture requires Windows")
@@ -172,13 +198,35 @@ class VoiceService:
             except subprocess.TimeoutExpired:
                 pass
 
+    def _start_barge_in_monitor(self, playback_cancel: threading.Event, monitor_stop: threading.Event):
+        if not hasattr(self.microphone, "wait_for_speech"):
+            return None
+
+        def monitor() -> None:
+            try:
+                if monitor_stop.wait(0.25):
+                    return
+                if self.microphone.wait_for_speech(monitor_stop):
+                    playback_cancel.set()
+                    self.cancel_playback()
+            except Exception:
+                logger.debug("Barge-in monitor failed", exc_info=True)
+
+        thread = threading.Thread(target=monitor, daemon=True, name="VoiceBargeIn")
+        thread.start()
+        return thread
+
     def speak(self, text: str, *, cancel_event=None) -> None:
         player = shutil.which("ffplay")
         if not player:
             return
 
+        playback_cancel = threading.Event()
+        monitor_stop = threading.Event()
+        monitor_thread = None
+
         def cancelled() -> bool:
-            return bool(cancel_event is not None and cancel_event.is_set())
+            return playback_cancel.is_set() or bool(cancel_event is not None and cancel_event.is_set())
 
         if cancelled():
             return
@@ -193,6 +241,7 @@ class VoiceService:
                 )
                 with self._playback_lock:
                     self._playback_process = process
+                monitor_thread = self._start_barge_in_monitor(playback_cancel, monitor_stop)
                 for chunk in self.relay.iter_tts(text, language="he"):
                     if cancelled():
                         process.kill()
@@ -213,6 +262,9 @@ class VoiceService:
             except (ProviderError, OSError, subprocess.SubprocessError) as exc:
                 logger.warning("Relay TTS streaming failed: %s", exc)
             finally:
+                monitor_stop.set()
+                if monitor_thread is not None and monitor_thread is not threading.current_thread():
+                    monitor_thread.join(timeout=1)
                 if process is not None and process.poll() is None:
                     process.kill()
                     process.wait(timeout=2)
@@ -235,6 +287,8 @@ class VoiceService:
             )
             with self._playback_lock:
                 self._playback_process = process
+            monitor_stop = threading.Event()
+            monitor_thread = self._start_barge_in_monitor(playback_cancel, monitor_stop)
             try:
                 while process.poll() is None:
                     if cancelled():
@@ -243,6 +297,9 @@ class VoiceService:
                     time.sleep(0.02)
                 process.wait(timeout=2)
             finally:
+                monitor_stop.set()
+                if monitor_thread is not None and monitor_thread is not threading.current_thread():
+                    monitor_thread.join(timeout=1)
                 if process.poll() is None:
                     process.kill()
                 with self._playback_lock:
