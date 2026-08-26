@@ -66,6 +66,8 @@ class AgentLoop:
         confirmation_provider: Callable[[ToolCall, str], ConfirmationGrant | None] | None = None,
         tool_planner=None,
         plan_reviewer=None,
+        skill_provider=None,
+        goal_provider=None,
     ) -> None:
         self.router = router
         self.memory = memory
@@ -77,6 +79,40 @@ class AgentLoop:
         self.confirmation_provider = confirmation_provider
         self.tool_planner = tool_planner
         self.plan_reviewer = plan_reviewer
+        self.skill_provider = skill_provider
+        self.goal_provider = goal_provider
+
+    def _effective_budget(self, budget: AgentBudget | None) -> AgentBudget:
+        value = budget or AgentBudget()
+        if self.goal_provider is None:
+            return value
+        try:
+            steps, calls = self.goal_provider.constrain(value.max_steps, value.max_tool_calls)
+        except Exception:
+            return value
+        return AgentBudget(max_steps=max(1, steps), max_tool_calls=max(0, calls), max_replans=value.max_replans)
+
+    def _initial_messages(self, user_text: str) -> list[Message]:
+        messages = [Message("system", self.system_prompt)]
+        context = self.memory.search(user_text)
+        if context:
+            messages.append(Message("system", "Relevant memory:\n" + "\n".join(context)))
+        if self.goal_provider is not None:
+            try:
+                goal_context = str(self.goal_provider.context() or "").strip()
+            except Exception:
+                goal_context = ""
+            if goal_context:
+                messages.append(Message("system", goal_context))
+        if self.skill_provider is not None:
+            try:
+                skill_context = str(self.skill_provider.context(user_text) or "").strip()
+            except Exception:
+                skill_context = ""
+            if skill_context:
+                messages.append(Message("system", "Relevant reusable skills:\n" + skill_context))
+        messages.append(Message("user", user_text))
+        return messages
 
     def run(
         self,
@@ -85,13 +121,9 @@ class AgentLoop:
         budget: AgentBudget | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> AgentRunResult:
-        budget = budget or AgentBudget()
+        budget = self._effective_budget(budget)
         cancelled = cancelled or (lambda: False)
-        context = self.memory.search(user_text)
-        messages = [Message("system", self.system_prompt)]
-        if context:
-            messages.append(Message("system", "Relevant memory:\n" + "\n".join(context)))
-        messages.append(Message("user", user_text))
+        messages = self._initial_messages(user_text)
 
         steps = tool_calls = replans = 0
         tool_calls, replans, planner_failure = self._apply_tool_planner(
@@ -175,18 +207,8 @@ class AgentLoop:
         budget: AgentBudget | None = None,
         cancel_event=None,
     ) -> Iterator[str]:
-        """Stream a bounded tool-aware agent turn for realtime voice.
-
-        Text deltas are forwarded immediately. Tool-call events stay internal, pass through
-        the same policy engine as non-streaming turns, and their observations are fed back
-        into the next model step before the final spoken answer continues.
-        """
-        budget = budget or AgentBudget()
-        context = self.memory.search(user_text)
-        messages = [Message("system", self.system_prompt)]
-        if context:
-            messages.append(Message("system", "Relevant memory:\n" + "\n".join(context)))
-        messages.append(Message("user", user_text))
+        budget = self._effective_budget(budget)
+        messages = self._initial_messages(user_text)
 
         steps = tool_calls = replans = 0
         cancelled = lambda: bool(cancel_event is not None and cancel_event.is_set())

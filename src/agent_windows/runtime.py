@@ -8,10 +8,12 @@ from .audio import ResilientUploader, UploadSession
 from .computer_use import ComputerRouter, UFOExecutor, WindowsUseExecutor, build_computer_tools
 from .config import Settings
 from .errors import ProviderUnavailable
+from .hermes_skills import HermesSkillStore, build_hermes_skill_tools
 from .memory import SQLiteMemoryStore
 from .network import NetworkMonitor
 from .needle_integration import NeedleToolPlanner
 from .ponytail import PonytailReviewer, build_ponytail_tools
+from .openhuman_goals import OpenHumanGoalStore, build_openhuman_goal_tools
 from .openviking_memory import OpenVikingClient, TieredMemoryStore
 from .orchestrator import AgentOrchestrator
 from .provider_manager import ProviderManager, RetryPolicy
@@ -75,11 +77,15 @@ class AgentRuntime:
             confidence_threshold=settings.needle_confidence_threshold,
             weights=settings.needle_weights,
         )
+        self.skills = HermesSkillStore(settings.data_dir / "skills")
+        self.goals = OpenHumanGoalStore(settings.data_dir / "thread-goal.json")
         tool_list = [
             *build_windows_tools((Path.cwd(), settings.data_dir)),
             *build_web_tools(self.web),
             *build_computer_tools(self.computer),
             *build_ponytail_tools(self.ponytail),
+            *build_hermes_skill_tools(self.skills),
+            *build_openhuman_goal_tools(self.goals),
         ]
         self.tools = ToolRegistry(tool_list)
         self.agent = AgentOrchestrator(
@@ -89,6 +95,8 @@ class AgentRuntime:
             policy_provider=self.network.policy,
             tool_planner=self.needle,
             plan_reviewer=self.ponytail,
+            skill_provider=self.skills,
+            goal_provider=self.goals,
         )
         stt_by_name = {"assemblyai": AssemblyAISTT(settings.assemblyai_key), "deepgram": DeepgramSTT(settings.deepgram_key)}
         self.stt = STTManager([stt_by_name[n] for n in settings.stt_order if n in stt_by_name])
@@ -127,7 +135,6 @@ class AgentRuntime:
             return "אין כרגע מודל זמין. כלי המערכת והזיכרון עדיין עובדים דרך ‎/tool ו־‎/memory."
 
     def stream_text(self, text: str, *, cancel_event=None):
-        """Stream the same policy-guarded AgentLoop used by text interactions."""
         self.provider_manager.apply_network_policy(self.network.policy())
         yield from self.agent.loop.stream(text, cancel_event=cancel_event)
 

@@ -27,6 +27,8 @@ class AgentOrchestrator:
         confirmation_provider=None,
         tool_planner=None,
         plan_reviewer=None,
+        skill_provider=None,
+        goal_provider=None,
     ) -> None:
         self.router = router
         self.memory = memory
@@ -44,6 +46,8 @@ class AgentOrchestrator:
             confirmation_provider=confirmation_provider,
             tool_planner=tool_planner,
             plan_reviewer=plan_reviewer,
+            skill_provider=skill_provider,
+            goal_provider=goal_provider,
         )
 
     @staticmethod
