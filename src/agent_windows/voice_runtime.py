@@ -97,6 +97,43 @@ class FFmpegMicrophone:
         frame_bytes = int(16000 * 2 * (frame_ms / 1000.0))
         return FFmpegPCMStream(process, frame_bytes=frame_bytes)
 
+    def wait_for_speech(self, stop_event: threading.Event, *, threshold: float = 0.04, timeout: float = 30.0) -> bool:
+        """Detect sustained microphone speech while agent audio is playing."""
+        if shutil.which(self.ffmpeg) is None or not __import__("sys").platform.startswith("win"):
+            return False
+        command = [
+            self.ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-f", "dshow", "-i", f"audio={self.device}",
+            "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1",
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            **hidden_subprocess_kwargs(),
+        )
+        vad = EnergyVAD(threshold=threshold, silence_ms=150, frame_ms=50)
+        started_at = time.monotonic()
+        consecutive_speech = 0
+        try:
+            while not stop_event.is_set() and time.monotonic() - started_at < timeout:
+                frame = process.stdout.read(1600) if process.stdout else b""
+                if len(frame) < 1600:
+                    return False
+                result = vad.process(frame, timestamp_ms=int((time.monotonic() - started_at) * 1000))
+                consecutive_speech = consecutive_speech + 1 if result.speech else 0
+                if consecutive_speech >= 2:
+                    return True
+            return False
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1)
+
     def capture_pcm_utterance(self, target: Path, vad: EnergyVAD) -> None:
         if shutil.which(self.ffmpeg) is None: raise MicrophoneUnavailable("FFmpeg is not installed or not on PATH")
         if not __import__("sys").platform.startswith("win"): raise MicrophoneUnavailable("voice capture requires Windows")
@@ -185,12 +222,40 @@ class VoiceService:
             except subprocess.TimeoutExpired:
                 pass
 
+    def _start_barge_in_monitor(
+        self,
+        playback_cancel: threading.Event,
+        monitor_stop: threading.Event,
+        external_cancel=None,
+    ):
+        if not hasattr(self.microphone, "wait_for_speech"):
+            return None
+
+        def monitor() -> None:
+            try:
+                if monitor_stop.wait(0.35):
+                    return
+                if self.microphone.wait_for_speech(monitor_stop):
+                    playback_cancel.set()
+                    if external_cancel is not None and hasattr(external_cancel, "set"):
+                        external_cancel.set()
+                    self.cancel_playback()
+            except Exception:
+                logger.debug("Barge-in monitor failed", exc_info=True)
+
+        thread = threading.Thread(target=monitor, daemon=True, name="VoiceBargeIn")
+        thread.start()
+        return thread
+
     def _play_stream(self, player: str, chunks, *, cancel_event=None, on_audio_start=None) -> bool:
-        """Feed encoded audio chunks to one hidden ffplay process."""
+        """Feed encoded audio chunks to one hidden ffplay process with live barge-in."""
         process = None
+        playback_cancel = threading.Event()
+        monitor_stop = threading.Event()
+        monitor_thread = None
 
         def cancelled() -> bool:
-            return bool(cancel_event is not None and cancel_event.is_set())
+            return playback_cancel.is_set() or bool(cancel_event is not None and cancel_event.is_set())
 
         try:
             process = subprocess.Popen(
@@ -213,17 +278,32 @@ class VoiceService:
                 if process.stdin is None:
                     break
                 streamed = True
-                if not audio_started and on_audio_start is not None:
+                if not audio_started:
                     audio_started = True
-                    on_audio_start()
-                process.stdin.write(chunk)
-                process.stdin.flush()
+                    monitor_thread = self._start_barge_in_monitor(
+                        playback_cancel, monitor_stop, cancel_event
+                    )
+                    if on_audio_start is not None:
+                        on_audio_start()
+                try:
+                    process.stdin.write(chunk)
+                    process.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    if cancelled():
+                        break
+                    raise
             if process.poll() is None and process.stdin is not None:
-                process.stdin.close()
+                try:
+                    process.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
             if process.poll() is None:
                 process.wait(timeout=30)
             return streamed
         finally:
+            monitor_stop.set()
+            if monitor_thread is not None and monitor_thread is not threading.current_thread():
+                monitor_thread.join(timeout=1)
             if process is not None and process.poll() is None:
                 process.kill()
                 try:

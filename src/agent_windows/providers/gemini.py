@@ -10,6 +10,14 @@ from ..http import HTTPStatusError, HTTPTransport, UrllibTransport
 from .base import validate_response
 
 
+_DEPRECATED_GEMINI_MODELS = {
+    "gemini-2.0-flash": "gemini-3.6-flash",
+    "gemini-2.0-flash-001": "gemini-3.6-flash",
+    "gemini-2.0-flash-lite": "gemini-3.1-flash-lite",
+    "gemini-2.0-flash-lite-001": "gemini-3.1-flash-lite",
+}
+
+
 class GeminiProvider:
     name = "gemini"
 
@@ -32,7 +40,7 @@ class GeminiProvider:
         for prefix in ("models/", "publishers/google/models/"):
             if value.startswith(prefix):
                 value = value[len(prefix):]
-        return value
+        return _DEPRECATED_GEMINI_MODELS.get(value, value)
 
     def is_available(self) -> bool:
         return bool(self.api_key and self.model)
