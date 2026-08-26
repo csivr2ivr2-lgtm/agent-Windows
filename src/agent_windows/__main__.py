@@ -7,7 +7,7 @@ import time
 import logging
 
 from .config import Settings
-from .diagnostics import collect, provider_check_report, run_llmfit
+from .diagnostics import collect, provider_check_report, realtime_check_report, run_llmfit
 from .logging_utils import configure_logging
 from .runtime import AgentRuntime
 from .benchmark import run_local_benchmark
@@ -19,7 +19,7 @@ def main(argv=None) -> int:
     sub=parser.add_subparsers(dest="command",required=True)
     sub.add_parser("chat"); sub.add_parser("voice"); sub.add_parser("status")
     doctor=sub.add_parser("doctor"); doctor.add_argument("--llmfit",action="store_true")
-    sub.add_parser("benchmark"); sub.add_parser("providers-check")
+    sub.add_parser("benchmark"); sub.add_parser("providers-check"); sub.add_parser("realtime-check")
     args=parser.parse_args(argv); settings=Settings.from_env(args.env); configure_logging(settings.log_level)
     with AgentRuntime(settings) as runtime:
         return _run(args, runtime)
@@ -35,6 +35,9 @@ def _run(args, runtime) -> int:
         return 0
     if args.command=="benchmark":
         print(json.dumps(run_local_benchmark(),indent=2))
+        return 0
+    if args.command=="realtime-check":
+        print(json.dumps(realtime_check_report(runtime), indent=2, ensure_ascii=False))
         return 0
     if args.command=="providers-check":
         report = provider_check_report(runtime)

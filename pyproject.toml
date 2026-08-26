@@ -15,10 +15,11 @@ dependencies = [
 
 [project.scripts]
 agent-windows = "agent_windows.__main__:main"
+ai-aharon-livekit = "agent_windows.livekit_runtime:main"
 
 [project.optional-dependencies]
 dev = ["coverage[toml]>=7.6,<8", "ruff>=0.9,<1"]
-realtime = ["livekit-agents==1.7.0"]
+realtime = ["livekit-agents[assemblyai,deepgram,elevenlabs]==1.7.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

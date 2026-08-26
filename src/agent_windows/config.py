@@ -61,6 +61,11 @@ class Settings:
     relay_token: str
     direct_allowed: bool
     microphone_device: str
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    realtime_backend: str = "auto"
+    livekit_agent_name: str = "ai-aharon"
 
     @classmethod
     def from_env(cls, dotenv: str | Path = ".env") -> "Settings":
@@ -83,4 +88,7 @@ class Settings:
             os.getenv("ELEVENLABS_MODEL", "eleven_v3"), os.getenv("AGENT_RELAY_BASE_URL", "").rstrip("/"),
             os.getenv("AGENT_RELAY_TOKEN", ""), os.getenv("AGENT_DIRECT_ALLOWED", "true").lower() in {"1","true","yes"},
             os.getenv("AGENT_MICROPHONE_DEVICE", "default"),
+            os.getenv("LIVEKIT_URL", ""), os.getenv("LIVEKIT_API_KEY", ""),
+            os.getenv("LIVEKIT_API_SECRET", ""), os.getenv("AGENT_REALTIME_BACKEND", "auto"),
+            os.getenv("LIVEKIT_AGENT_NAME", "ai-aharon"),
         )
