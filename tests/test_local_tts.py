@@ -35,8 +35,9 @@ class LocalTtsTests(unittest.TestCase):
         with mock.patch("sys.platform", "win32"):
             self.service().speak("שלום; $(Remove-Item C:\\*)", on_audio_start=lambda: started.append(True))
         command = popen.call_args.args[0]
-        self.assertIn("-LiteralPath $args[0]", command)
-        self.assertNotIn("שלום", " ".join(command))
+        command_text = " ".join(command)
+        self.assertIn("-LiteralPath $args[0]", command_text)
+        self.assertNotIn("שלום", command_text)
         self.assertEqual(started, [True])
 
     @mock.patch("agent_windows.voice_runtime.time.sleep", return_value=None)
