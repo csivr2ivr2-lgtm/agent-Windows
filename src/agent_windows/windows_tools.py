@@ -46,7 +46,8 @@ def build_windows_tools(allowed_roots: tuple[Path, ...]) -> list[FunctionTool]:
             raise ValueError("file exceeds 1 MB read limit")
         return path.read_text(encoding="utf-8", errors="replace")
     return [
-        FunctionTool("current_time", "Get current local date and time", {"type":"object","properties":{}}, now),
+        FunctionTool("current_datetime", "Get current local date and time from the Windows host clock", {"type":"object","properties":{}}, now),
+        FunctionTool("current_time", "Backward-compatible alias for current_datetime", {"type":"object","properties":{}}, now),
         FunctionTool("system_info", "Get safe OS, CPU, Python and disk information", {"type":"object","properties":{}}, system),
         FunctionTool("list_directory", "List an allowed directory", {"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}, list_dir),
         FunctionTool("read_text_file", "Read a small UTF-8 text file in an allowed directory", {"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}, read_text),

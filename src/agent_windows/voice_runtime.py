@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+import threading
 from pathlib import Path
 
 from .audio import AudioChunker, EnergyVAD, FFmpegCapabilities, NetworkState, ResilientUploader, ffmpeg_command, profile_for
@@ -80,6 +81,8 @@ class VoiceService:
         self.microphone, self.stt, self.tts, self.relay = microphone, stt, tts, relay
         self.network, self.spool = network_monitor, spool
         self.direct_allowed = direct_allowed
+        self._playback_lock = threading.Lock()
+        self._playback_process = None
 
     def listen(self) -> str:
         state = self.network.state if self.network else NetworkState.GOOD
@@ -119,13 +122,26 @@ class VoiceService:
             data = encoded.read_bytes()
             return self.stt.transcribe(data, content_type=profile.content_type, language="he")
 
-    def speak(self, text: str) -> None:
+    def cancel_playback(self) -> None:
+        with self._playback_lock:
+            process = self._playback_process
+        if process is not None and process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def speak(self, text: str, *, cancel_event=None) -> None:
         player = shutil.which("ffplay")
         if not player:
             return
 
-        # Prefer relay streaming: playback starts as soon as the first MP3 bytes arrive,
-        # instead of waiting for the entire ElevenLabs response to download.
+        def cancelled() -> bool:
+            return bool(cancel_event is not None and cancel_event.is_set())
+
+        if cancelled():
+            return
         if self.relay and self.relay.is_available() and hasattr(self.relay, "iter_tts"):
             process = None
             streamed = False
@@ -135,7 +151,12 @@ class VoiceService:
                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     **hidden_subprocess_kwargs(),
                 )
+                with self._playback_lock:
+                    self._playback_process = process
                 for chunk in self.relay.iter_tts(text, language="he"):
+                    if cancelled():
+                        process.kill()
+                        break
                     if not chunk:
                         continue
                     streamed = True
@@ -143,10 +164,11 @@ class VoiceService:
                         break
                     process.stdin.write(chunk)
                     process.stdin.flush()
-                if process.stdin is not None:
+                if process.poll() is None and process.stdin is not None:
                     process.stdin.close()
-                process.wait(timeout=30)
-                if streamed:
+                if process.poll() is None:
+                    process.wait(timeout=30)
+                if streamed or cancelled():
                     return
             except (ProviderError, OSError, subprocess.SubprocessError) as exc:
                 logger.warning("Relay TTS streaming failed: %s", exc)
@@ -154,17 +176,53 @@ class VoiceService:
                 if process is not None and process.poll() is None:
                     process.kill()
                     process.wait(timeout=2)
-            if streamed:
-                return
+                with self._playback_lock:
+                    if self._playback_process is process:
+                        self._playback_process = None
 
-        if not self.tts or not self.tts.is_available():
+        if cancelled() or not self.tts or not self.tts.is_available():
             return
         audio = self.tts.synthesize(text, language="he")
+        if cancelled():
+            return
         with tempfile.TemporaryDirectory() as directory:
             audio_path = Path(directory) / "speech.mp3"
             audio_path.write_bytes(audio)
-            subprocess.run(
+            process = subprocess.Popen(
                 [player, "-nodisp", "-autoexit", "-loglevel", "error", str(audio_path)],
-                check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 **hidden_subprocess_kwargs(),
             )
+            with self._playback_lock:
+                self._playback_process = process
+            try:
+                while process.poll() is None:
+                    if cancelled():
+                        process.kill()
+                        break
+                    time.sleep(0.02)
+                process.wait(timeout=2)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                with self._playback_lock:
+                    if self._playback_process is process:
+                        self._playback_process = None
+
+    def speak_chunks(self, chunks, *, cancel_event=None) -> None:
+        buffer = []
+        size = 0
+        for chunk in chunks:
+            if cancel_event is not None and cancel_event.is_set():
+                self.cancel_playback()
+                return
+            if not chunk:
+                continue
+            buffer.append(chunk)
+            size += len(chunk)
+            text = "".join(buffer)
+            if size >= 80 and (text.rstrip().endswith((".", "!", "?", ":", ";", "\n")) or size >= 180):
+                self.speak(text.strip(), cancel_event=cancel_event)
+                buffer.clear(); size = 0
+        if buffer and not (cancel_event is not None and cancel_event.is_set()):
+            self.speak("".join(buffer).strip(), cancel_event=cancel_event)

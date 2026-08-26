@@ -105,6 +105,38 @@ class ProviderManager:
                 failures.append(f"{provider.name}: {exc}")
         raise ProviderUnavailable("All LLM providers failed: " + "; ".join(failures))
 
+    def stream(self, messages: Sequence[Message], tools: Sequence[Mapping[str, Any]], *, cancel_event=None):
+        """Yield response text incrementally when supported, with safe full-response fallback."""
+        failures = []
+        for provider in self.providers:
+            state = self.health[provider.name]
+            now = self._clock()
+            if not provider.is_available() or state.cooldown_until > now:
+                continue
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            try:
+                if hasattr(provider, "stream"):
+                    for chunk in provider.stream(messages, tools, cancel_event=cancel_event):
+                        if cancel_event is not None and cancel_event.is_set():
+                            return
+                        if chunk:
+                            yield chunk
+                else:
+                    response = self._attempt(provider, messages, tools)
+                    if response.content:
+                        yield response.content
+                state.healthy = True
+                state.consecutive_failures = 0
+                state.cooldown_until = 0.0
+                state.last_error = None
+                return
+            except ProviderError as exc:
+                self._record_failure(state, exc)
+                failures.append(f"{provider.name}: {exc}")
+        if failures:
+            raise ProviderUnavailable("All LLM providers failed: " + "; ".join(failures))
+
     def _attempt(self, provider, messages, tools):
         policy = self.retry_policy
         for attempt in range(1, max(1, policy.max_attempts) + 1):
