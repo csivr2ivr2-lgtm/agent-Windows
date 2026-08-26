@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -118,6 +119,26 @@ class HardeningTests(unittest.TestCase):
             path.unlink(); Path(str(path) + "-wal").unlink(missing_ok=True); Path(str(path) + "-shm").unlink(missing_ok=True)
             path.write_bytes(b"not sqlite")
             with self.assertRaises(sqlite3.DatabaseError): SQLiteMemoryStore(path)
+
+    def test_sqlite_store_can_be_used_from_service_worker_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "threaded.db"
+            store = SQLiteMemoryStore(path)
+            errors = []
+
+            def worker():
+                try:
+                    store.remember("thread memory")
+                    self.assertEqual(store.search("thread memory"), ["thread memory"])
+                except Exception as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=worker)
+            thread.start()
+            thread.join(timeout=5)
+            store.close()
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
 
     def test_sqlite_explicit_close_is_idempotent_and_releases_file(self):
         with tempfile.TemporaryDirectory() as directory:
