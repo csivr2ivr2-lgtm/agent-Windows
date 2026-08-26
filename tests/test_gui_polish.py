@@ -21,7 +21,9 @@ class GuiPolishTests(unittest.TestCase):
         self.assertNotIn("agent", gui.HEBREW_LABELS)
 
     def test_default_prompt_requires_hebrew_and_real_system_tools(self):
-        self.assertIn("ענה תמיד בעברית", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("שפת הפלט המחייבת היא עברית", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("ענה בעברית בלבד בכל תשובה", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("אל תעבור לאנגלית בגלל שגיאת תמלול", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("אל תנחש שעה, תאריך או מידע מערכת", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("השתמש בכלי המערכת", DEFAULT_SYSTEM_PROMPT)
 
