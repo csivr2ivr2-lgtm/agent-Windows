@@ -137,7 +137,10 @@ class LocalRealtimeSession:
         self._active_turn: ConversationTurn | None = None
         self._history_lock = threading.Lock()
         self._turns: list[ConversationTurn] = []
-        self._max_history_turns = 8
+        self._max_history_turns = 12
+        self._history_user_chars = 320
+        self._history_assistant_chars = 520
+        self._session_anchor_turns = 4
         self._barge_frames_seen = 0
         self._barge_accepted = False
         self._session_error: BaseException | None = None
@@ -152,19 +155,50 @@ class LocalRealtimeSession:
             thread = self._response_thread
         return bool(thread and thread.is_alive())
 
+    @staticmethod
+    def _clip_context(text: str, limit: int) -> str:
+        clean = " ".join(text.split())
+        if len(clean) <= limit:
+            return clean
+        if limit < 24:
+            return clean[:limit]
+        head = max(1, (limit - 5) * 2 // 3)
+        tail = max(1, limit - 5 - head)
+        return clean[:head].rstrip() + " ... " + clean[-tail:].lstrip()
+
     def _history_snapshot(self) -> tuple[Message, ...]:
         with self._history_lock:
             turns = list(self._turns[-self._max_history_turns :])
         messages: list[Message] = []
         for turn in turns:
-            if turn.user.strip():
-                messages.append(Message("user", turn.user.strip()))
-            assistant = turn.assistant.strip()
+            user = self._clip_context(turn.user, self._history_user_chars)
+            if user:
+                messages.append(Message("user", user))
+            assistant = self._clip_context(turn.assistant, self._history_assistant_chars)
             if assistant:
                 if turn.interrupted:
                     assistant += "\n[התגובה נקטעה על ידי המשתמש.]"
                 messages.append(Message("assistant", assistant))
         return tuple(messages)
+
+    def _session_context_snapshot(self) -> str:
+        with self._history_lock:
+            turns = list(self._turns[-self._session_anchor_turns :])
+        lines: list[str] = []
+        for turn in turns:
+            user = self._clip_context(turn.user, 220)
+            if user:
+                lines.append(f"משתמש: {user}")
+            assistant = self._clip_context(turn.assistant, 220)
+            if assistant:
+                suffix = " [נקטע]" if turn.interrupted else ""
+                lines.append(f"עוזר: {assistant}{suffix}")
+        if not lines:
+            return ""
+        return (
+            "שמור על רצף השיחה ועל הנושא הפעיל. פרש בקשות קצרות כהמשך טבעי אלא אם "
+            "המשתמש פתח במפורש נושא חדש.\n" + "\n".join(lines)
+        )
 
     def _begin_turn(self, text: str) -> tuple[ConversationTurn, tuple[Message, ...]]:
         history = self._history_snapshot()
@@ -210,8 +244,18 @@ class LocalRealtimeSession:
             return
         if self._response_active():
             self._cancel_response_for_barge_in()
+        session_context = self._session_context_snapshot()
         turn, history = self._begin_turn(text)
         prompt_text = _contextualize_followup(text, history)
+        model_history = history
+        if session_context:
+            model_history = (
+                *history,
+                Message(
+                    "user",
+                    "[עוגן הקשר פנימי לשיחת הקול; אין לענות עליו בנפרד]\n" + session_context,
+                ),
+            )
         scope = CancellationScope()
         with self._response_lock:
             self._response_scope = scope
@@ -227,7 +271,7 @@ class LocalRealtimeSession:
             def chunks():
                 nonlocal first_token
                 for chunk in self.runtime.stream_text(
-                    prompt_text, cancel_event=scope.event, history=history
+                    prompt_text, cancel_event=scope.event, history=model_history
                 ):
                     if scope.cancelled:
                         return

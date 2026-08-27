@@ -144,8 +144,33 @@ class LocalRealtimeTests(unittest.TestCase):
         self.assertEqual(history[0].content, "תסביר לי מה זה MCP")
         self.assertEqual(history[1].role, "assistant")
         self.assertIn("התגובה נקטעה", history[1].content)
+        self.assertIn("עוגן הקשר פנימי", history[-1].content)
+        self.assertIn("MCP", history[-1].content)
+        self.assertIn("שמור על רצף השיחה", history[-1].content)
 
         session._cancel_response_for_barge_in()
+
+    def test_session_history_stays_compact_but_keeps_more_turns(self):
+        runtime = FakeRuntime([True])
+        session = LocalRealtimeSession(runtime)
+        for index in range(14):
+            turn, _ = session._begin_turn(f"שאלה {index} " + "א" * 500)
+            session._append_assistant_chunk(turn, f"תשובה {index} " + "ב" * 900)
+
+        history = session._history_snapshot()
+        users = [message for message in history if message.role == "user"]
+        assistants = [message for message in history if message.role == "assistant"]
+        self.assertEqual(len(users), 12)
+        self.assertEqual(len(assistants), 12)
+        self.assertTrue(all(len(message.content) <= 320 for message in users))
+        self.assertTrue(all(len(message.content) <= 520 for message in assistants))
+        self.assertIn("שאלה 13", users[-1].content)
+        self.assertNotIn("שאלה 0", " ".join(message.content for message in users))
+
+        anchor = session._session_context_snapshot()
+        self.assertIn("שאלה 13", anchor)
+        self.assertIn("שאלה 10", anchor)
+        self.assertNotIn("שאלה 9", anchor)
 
     def test_response_blank_error_and_metrics(self):
         keep = [True]; runtime = FakeRuntime(keep); states=[]
