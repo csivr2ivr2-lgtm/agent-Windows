@@ -52,7 +52,7 @@ if (Test-Path $RuntimeRoot) {
     Remove-Item -Path $RuntimeRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
-& robocopy.exe $BundledRuntime $RuntimeRoot /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
+& robocopy.exe "$BundledRuntime" "$RuntimeRoot" /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
 if ($LASTEXITCODE -ge 8) {
     throw "Installing bundled Python runtime failed (robocopy exit $LASTEXITCODE)."
 }
@@ -61,14 +61,14 @@ $BundledTools = Join-Path $InstallRoot 'tools'
 if (Test-Path $BundledTools) {
     if (Test-Path $ToolsRoot) { Remove-Item -Path $ToolsRoot -Recurse -Force }
     New-Item -ItemType Directory -Path $ToolsRoot -Force | Out-Null
-    & robocopy.exe $BundledTools $ToolsRoot /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
+    & robocopy.exe "$BundledTools" "$ToolsRoot" /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
     if ($LASTEXITCODE -ge 8) {
         throw "Installing bundled media tools failed (robocopy exit $LASTEXITCODE)."
     }
 }
 
 $Python = Join-Path $RuntimeRoot 'python.exe'
-& $Python -m pip install --disable-pip-version-check --no-index --force-reinstall --no-deps $InstallRoot
+& "$Python" -m pip install --disable-pip-version-check --no-index --no-build-isolation --force-reinstall --no-deps "$InstallRoot"
 if ($LASTEXITCODE -ne 0) { throw 'Installing AI Aharon package failed.' }
 
 $ServiceEnv = Join-Path $ServiceRoot '.env'
@@ -81,11 +81,11 @@ if (-not (Test-Path $ServiceEnv)) {
 # Preserve memory and settings across upgrades. Only stale service registration is replaced.
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($null -ne $existing) {
-    & $Python -m agent_windows.windows_service remove | Out-Null
+    & "$Python" -m agent_windows.windows_service remove | Out-Null
     Start-Sleep -Milliseconds 800
 }
 
-& $Python -m agent_windows.windows_service --startup auto install
+& "$Python" -m agent_windows.windows_service --startup auto install
 if ($LASTEXITCODE -ne 0) { throw 'Windows service installation failed.' }
 
 Start-Service -Name $ServiceName
