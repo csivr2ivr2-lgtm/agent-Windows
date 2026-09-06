@@ -104,7 +104,7 @@ jobs:
           set -euo pipefail
           if [ -z "$SONAR_TOKEN" ]; then
             printf '### SonarCloud diagnostic (temporary)\n\n`SONAR_TOKEN` is not configured as a repository secret.\n' > sonar-summary.md
-            gh pr comment "$PR_NUMBER" --body-file sonar-summary.md
+            gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file sonar-summary.md
             exit 0
           fi
           auth_header="Authorization: Bearer $SONAR_TOKEN"
@@ -142,4 +142,4 @@ jobs:
               message = item.get("message", "")
               print(f"- **{status}** `{path}:{line}` `{rule}` — {message}")
           PY
-          gh pr comment "$PR_NUMBER" --body-file sonar-summary.md
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file sonar-summary.md
