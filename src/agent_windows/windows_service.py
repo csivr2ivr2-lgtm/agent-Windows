@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -11,13 +12,11 @@ SERVICE_CLASS_STRING = "agent_windows.windows_service.AgentWindowsService"
 
 
 def _project_root() -> Path:
+    """Return the writable machine state root used for config, memory, and logs."""
     configured = os.getenv("AGENT_WINDOWS_HOME", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
 
-    # A real Windows service runs as LocalSystem and should not depend on a
-    # per-user profile/virtualenv. The installer places the service runtime
-    # under ProgramData and copies its .env there.
     program_data = os.getenv("PROGRAMDATA", "").strip()
     if program_data:
         machine_root = Path(program_data) / "AgentWindowsAI"
@@ -25,6 +24,19 @@ def _project_root() -> Path:
             return machine_root.resolve()
 
     # Developer / CLI fallback.
+    return Path(__file__).resolve().parents[2]
+
+
+def _install_root() -> Path:
+    """Return the admin-protected program root containing runtime and media tools."""
+    configured = os.getenv("AGENT_WINDOWS_INSTALL_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    executable = Path(sys.executable).resolve()
+    if executable.parent.name.casefold() == "python-runtime":
+        return executable.parent.parent
+
     return Path(__file__).resolve().parents[2]
 
 
@@ -68,15 +80,24 @@ if sys.platform.startswith("win"):
                 from .runtime import AgentRuntime
                 from .service_api import ServiceBackend
 
-                root = _project_root()
+                state_root = _project_root()
+                install_root = _install_root()
                 previous_cwd = Path.cwd()
-                os.environ.setdefault("AGENT_WINDOWS_HOME", str(root))
-                bundled_tools = root / "tools"
+                os.environ.setdefault("AGENT_WINDOWS_HOME", str(state_root))
+                os.environ.setdefault("AGENT_WINDOWS_INSTALL_ROOT", str(install_root))
+                bundled_tools = install_root / "tools"
                 if bundled_tools.is_dir():
-                    os.environ["PATH"] = str(bundled_tools) + os.pathsep + os.environ.get("PATH", "")
-                os.chdir(root)
+                    os.environ["PATH"] = (
+                        str(bundled_tools) + os.pathsep + os.environ.get("PATH", "")
+                    )
+                os.chdir(install_root)
                 try:
-                    settings = Settings.from_env(root / ".env")
+                    settings = Settings.from_env(state_root / ".env")
+                    if not settings.data_dir.is_absolute():
+                        settings = replace(
+                            settings,
+                            data_dir=(state_root / settings.data_dir).resolve(),
+                        )
                     configure_logging(settings.log_level)
                     servicemanager.LogInfoMsg("Agent Windows AI service starting")
                     try:
@@ -95,7 +116,8 @@ if sys.platform.startswith("win"):
                             worker.join(timeout=5)
                     except Exception:
                         servicemanager.LogErrorMsg(
-                            "Agent Windows AI service crashed:\n" + _format_current_exception()
+                            "Agent Windows AI service crashed:\n"
+                            + _format_current_exception()
                         )
                         raise
                     finally:
