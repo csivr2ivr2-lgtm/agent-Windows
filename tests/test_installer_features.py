@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -12,7 +13,7 @@ from agent_windows.agent_loop import AgentLoop
 from agent_windows.contracts import Message
 from agent_windows.memory import SQLiteMemoryStore
 from agent_windows.settings_ui import read_env_file, update_env_file
-from agent_windows.updater import check_for_update, is_newer
+from agent_windows.updater import UpdateInfo, check_for_update, download_update, is_newer
 
 
 class MemoryRankingTests(unittest.TestCase):
@@ -116,6 +117,39 @@ class UpdaterTests(unittest.TestCase):
     def test_update_rejects_non_official_feed(self):
         with self.assertRaises(ValueError):
             check_for_update("https://example.invalid/update.json")
+
+    def test_download_update_verifies_sha256(self):
+        content = b"signed installer bytes"
+        info = UpdateInfo(
+            version="9.8.7",
+            url="https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/download/v9.8.7/AI-Aharon-Setup-9.8.7.exe",
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.side_effect = [content, b""]
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "agent_windows.updater.tempfile.gettempdir", return_value=directory
+        ), mock.patch("agent_windows.updater.urllib.request.urlopen", return_value=response):
+            path = download_update(info)
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_download_update_removes_bad_hash(self):
+        content = b"tampered installer"
+        info = UpdateInfo(
+            version="9.8.6",
+            url="https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/download/v9.8.6/AI-Aharon-Setup-9.8.6.exe",
+            sha256="0" * 64,
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.side_effect = [content, b""]
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "agent_windows.updater.tempfile.gettempdir", return_value=directory
+        ), mock.patch("agent_windows.updater.urllib.request.urlopen", return_value=response):
+            with self.assertRaises(ValueError):
+                download_update(info)
+            self.assertFalse(any(Path(directory).iterdir()))
 
 
 if __name__ == "__main__":
