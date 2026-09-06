@@ -13,7 +13,14 @@ from agent_windows.agent_loop import AgentLoop
 from agent_windows.contracts import Message
 from agent_windows.memory import SQLiteMemoryStore
 from agent_windows.settings_ui import read_env_file, update_env_file
-from agent_windows.updater import UpdateInfo, check_for_update, download_update, is_newer
+from agent_windows.updater import (
+    DEFAULT_INSTALLER_URL,
+    UpdateInfo,
+    check_for_update,
+    download_update,
+    is_newer,
+    launch_installer,
+)
 
 
 class MemoryRankingTests(unittest.TestCase):
@@ -119,75 +126,111 @@ class UpdaterTests(unittest.TestCase):
         self.assertTrue(is_newer("v1.0.1", "1.0.0"))
         self.assertFalse(is_newer("1.0.0", "1.0.0"))
 
-    def test_update_metadata_validation(self):
-        payload = json.dumps(
-            {
-                "version": "99.0.0",
-                "url": "https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/download/v99.0.0/AI-Aharon-Setup-99.0.0.exe",
-                "sha256": "a" * 64,
-            }
-        ).encode()
+    @staticmethod
+    def _metadata_response(payload):
         response = mock.MagicMock()
         response.__enter__.return_value = response
-        response.read.return_value = payload
+        response.read.return_value = json.dumps(payload).encode()
         response.geturl.return_value = (
             "https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/latest/download/update.json"
         )
         opener = mock.MagicMock()
         opener.open.return_value = response
-        with mock.patch(
-            "agent_windows.updater._opener", return_value=opener
-        ), mock.patch("agent_windows.updater.current_version", return_value="1.0.0"):
-            info = check_for_update(
-                "https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/latest/download/update.json"
-            )
+        return opener
+
+    def test_update_metadata_uses_fixed_official_installer_url(self):
+        opener = self._metadata_response(
+            {"version": "99.0.0", "sha256": "a" * 64}
+        )
+        with mock.patch("agent_windows.updater._opener", return_value=opener), mock.patch(
+            "agent_windows.updater.current_version", return_value="1.0.0"
+        ):
+            info = check_for_update()
         self.assertIsNotNone(info)
         self.assertEqual(info.version, "99.0.0")
+        self.assertEqual(info.url, DEFAULT_INSTALLER_URL)
 
-    def test_update_rejects_non_official_feed(self):
-        with self.assertRaises(ValueError):
-            check_for_update("https://example.invalid/update.json")
+    def test_update_metadata_cannot_override_installer_url(self):
+        opener = self._metadata_response(
+            {
+                "version": "99.0.0",
+                "url": "https://example.invalid/installer.exe",
+                "sha256": "a" * 64,
+            }
+        )
+        with mock.patch("agent_windows.updater._opener", return_value=opener):
+            with self.assertRaises(ValueError):
+                check_for_update()
+
+    @staticmethod
+    def _staging_factory(directory, digest):
+        staging = Path(directory) / f"AI-Aharon-Update-{digest}-test"
+        staging.mkdir()
+        return str(staging)
 
     def test_download_update_verifies_sha256(self):
         content = b"signed installer bytes"
         info = UpdateInfo(
             version="9.8.7",
-            url="https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/download/v9.8.7/AI-Aharon-Setup-9.8.7.exe",
+            url=DEFAULT_INSTALLER_URL,
             sha256=hashlib.sha256(content).hexdigest(),
         )
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.read.side_effect = [content, b""]
-        response.geturl.return_value = info.url
+        response.geturl.return_value = DEFAULT_INSTALLER_URL
         response.headers = {}
         opener = mock.MagicMock()
         opener.open.return_value = response
         with tempfile.TemporaryDirectory() as directory, mock.patch(
-            "agent_windows.updater.tempfile.gettempdir", return_value=directory
+            "agent_windows.updater.tempfile.mkdtemp",
+            side_effect=lambda **_: self._staging_factory(directory, info.sha256),
         ), mock.patch("agent_windows.updater._opener", return_value=opener):
             path = download_update(info)
             self.assertEqual(path.read_bytes(), content)
+            self.assertTrue(path.parent.name.startswith(f"AI-Aharon-Update-{info.sha256}-"))
 
     def test_download_update_removes_bad_hash(self):
         content = b"tampered installer"
         info = UpdateInfo(
             version="9.8.6",
-            url="https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/download/v9.8.6/AI-Aharon-Setup-9.8.6.exe",
+            url=DEFAULT_INSTALLER_URL,
             sha256="0" * 64,
         )
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.read.side_effect = [content, b""]
-        response.geturl.return_value = info.url
+        response.geturl.return_value = DEFAULT_INSTALLER_URL
         response.headers = {}
         opener = mock.MagicMock()
         opener.open.return_value = response
         with tempfile.TemporaryDirectory() as directory, mock.patch(
-            "agent_windows.updater.tempfile.gettempdir", return_value=directory
+            "agent_windows.updater.tempfile.mkdtemp",
+            side_effect=lambda **_: self._staging_factory(directory, info.sha256),
         ), mock.patch("agent_windows.updater._opener", return_value=opener):
             with self.assertRaises(ValueError):
                 download_update(info)
             self.assertFalse(any(Path(directory).iterdir()))
+
+    def test_launch_rehashes_installer_before_start(self):
+        content = b"verified installer"
+        digest = hashlib.sha256(content).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            staging = Path(directory) / f"AI-Aharon-Update-{digest}-test"
+            staging.mkdir()
+            installer = staging / "AI-Aharon-Setup-9.8.5.exe"
+            installer.write_bytes(content)
+            startfile = mock.Mock()
+            with mock.patch(
+                "agent_windows.updater.tempfile.gettempdir", return_value=directory
+            ), mock.patch("agent_windows.updater.os.name", "nt"), mock.patch.object(
+                __import__("agent_windows.updater", fromlist=["os"]).os,
+                "startfile",
+                startfile,
+                create=True,
+            ):
+                launch_installer(installer)
+            startfile.assert_called_once_with(str(installer.resolve()))
 
 
 class DistributionHardeningTests(unittest.TestCase):
@@ -200,6 +243,19 @@ class DistributionHardeningTests(unittest.TestCase):
         )
         self.assertIn('start.EnvironmentVariables["PATH"] = tools + ";"', source)
         self.assertIn("start.UseShellExecute = false", source)
+        self.assertIn("AppDomain.CurrentDomain.BaseDirectory", source)
+        self.assertIn('Path.Combine(installRoot, "python-runtime", "pythonw.exe")', source)
+        self.assertIn('Path.Combine(stateRoot, ".env")', source)
+
+    def test_installer_keeps_privileged_runtime_out_of_programdata(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "scripts" / "installer-apply.ps1").read_text(encoding="utf-8")
+        self.assertIn("$RuntimeRoot = Join-Path $InstallRoot 'python-runtime'", source)
+        self.assertIn("$ToolsRoot = Join-Path $InstallRoot 'tools'", source)
+        self.assertIn("$LegacyRuntimeRoot = Join-Path $ServiceRoot 'python-runtime'", source)
+        self.assertIn("[Security.AccessControl.FileSystemRights]::Modify", source)
+        self.assertNotIn("robocopy.exe", source)
+        self.assertNotIn("pip install", source)
 
     def test_installer_does_not_bypass_powershell_execution_policy(self):
         root = Path(__file__).resolve().parents[1]
