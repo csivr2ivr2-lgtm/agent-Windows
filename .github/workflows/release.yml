@@ -12,12 +12,17 @@ on:
         default: "0.2.0"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-windows-installer:
     runs-on: windows-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release_version.outputs.version }}
+      tag_name: ${{ steps.release_version.outputs.tag_name }}
 
     steps:
       - name: Checkout
@@ -30,6 +35,7 @@ jobs:
           cache: pip
 
       - name: Resolve release version
+        id: release_version
         shell: pwsh
         env:
           REF_TYPE: ${{ github.ref_type }}
@@ -48,6 +54,8 @@ jobs:
           }
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
           "TAG_NAME=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag_name=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Stamp package version
         shell: pwsh
@@ -183,20 +191,34 @@ jobs:
             dist/checksums.sha256
           if-no-files-found: error
 
-      - name: Publish GitHub Release
-        if: github.ref_type == 'tag'
-        shell: pwsh
+  publish-release:
+    needs: build-windows-installer
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build-windows-installer.outputs.version }}
+      TAG_NAME: ${{ needs.build-windows-installer.outputs.tag_name }}
+    steps:
+      - name: Download immutable build artifact
         env:
-          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          $files = @(
-            "dist\AI-Aharon-Setup-$env:VERSION.exe",
-            "dist\update.json",
-            "dist\checksums.sha256"
+          mkdir -p dist
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "AI-Aharon-Windows-$VERSION" --dir dist
+
+      - name: Publish GitHub Release
+        run: |
+          files=(
+            "dist/AI-Aharon-Setup-$VERSION.exe"
+            "dist/update.json"
+            "dist/checksums.sha256"
           )
-          gh release view $env:TAG_NAME *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:TAG_NAME @files --clobber
-          } else {
-            gh release create $env:TAG_NAME @files --generate-notes --title "AI Aharon $env:VERSION"
-          }
+          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --generate-notes --title "AI Aharon $VERSION"
+          fi
