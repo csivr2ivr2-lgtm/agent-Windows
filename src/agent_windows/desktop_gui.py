@@ -209,8 +209,8 @@ class AgentDesktopApp:
                 if manual and not self._closing.is_set():
                     self.root.after(
                         0,
-                        lambda: messagebox.showerror(
-                            "בדיקת עדכון נכשלה", str(exc), parent=self.root
+                        lambda message=str(exc): messagebox.showerror(
+                            "בדיקת עדכון נכשלה", message, parent=self.root
                         ),
                     )
                 return
@@ -247,8 +247,8 @@ class AgentDesktopApp:
                         LOGGER.exception("Update download failed")
                         self.root.after(
                             0,
-                            lambda: messagebox.showerror(
-                                "העדכון נכשל", str(exc), parent=self.root
+                            lambda message=str(exc): messagebox.showerror(
+                                "העדכון נכשל", message, parent=self.root
                             ),
                         )
 
