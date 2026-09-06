@@ -16,18 +16,19 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        string root = Path.Combine(
+        string installRoot = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory);
+        string stateRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "AgentWindowsAI"
         );
-        string python = Path.Combine(root, "python-runtime", "pythonw.exe");
-        string envFile = Path.Combine(root, ".env");
-        string tools = Path.Combine(root, "tools");
+        string python = Path.Combine(installRoot, "python-runtime", "pythonw.exe");
+        string envFile = Path.Combine(stateRoot, ".env");
+        string tools = Path.Combine(installRoot, "tools");
 
-        if (!File.Exists(python))
+        if (!File.Exists(python) || !File.Exists(envFile))
         {
             MessageBox.Show(
-                "AI Aharon runtime is missing. Run the installer again.",
+                "AI Aharon installation is incomplete. Run the installer again.",
                 "AI Aharon",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error
@@ -50,10 +51,11 @@ internal static class Program
         var start = new ProcessStartInfo();
         start.FileName = python;
         start.Arguments = command.ToString();
-        start.WorkingDirectory = root;
+        start.WorkingDirectory = stateRoot;
         start.UseShellExecute = false;
         start.CreateNoWindow = true;
-        start.EnvironmentVariables["AGENT_WINDOWS_HOME"] = root;
+        start.EnvironmentVariables["AGENT_WINDOWS_HOME"] = stateRoot;
+        start.EnvironmentVariables["AGENT_WINDOWS_INSTALL_ROOT"] = installRoot;
         if (Directory.Exists(tools))
         {
             start.EnvironmentVariables["PATH"] = tools + ";" + start.EnvironmentVariables["PATH"];
