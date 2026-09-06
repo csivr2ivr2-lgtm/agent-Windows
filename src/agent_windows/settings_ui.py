@@ -97,7 +97,7 @@ def update_env_file(path: str | Path, updates: dict[str, str]) -> None:
     os.replace(temporary, file)
 
 
-def show_settings_window(
+def show_settings_window(  # pragma: no cover - interactive Tk window
     parent,
     env_path: str | Path,
     *,
