@@ -1,0 +1,196 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (for example 0.2.0)"
+        required: true
+        default: "0.2.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Resolve release version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+            $tag = "${{ github.ref_name }}"
+          } else {
+            $version = "${{ inputs.version }}".TrimStart("v")
+            $tag = "v$version"
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$') {
+            throw "Invalid version: $version"
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TAG_NAME=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Stamp package version
+        shell: pwsh
+        run: |
+          $path = "pyproject.toml"
+          $text = Get-Content $path -Raw
+          $rx = [regex]'(?m)^version\s*=\s*"[^"]+"'
+          $text = $rx.Replace($text, "version = `"$env:VERSION`"", 1)
+          Set-Content -Path $path -Value $text -Encoding utf8
+
+      - name: Validate Python source
+        shell: pwsh
+        run: |
+          python -m compileall -q src tests
+          python -m pip install --disable-pip-version-check -e .
+          python -m unittest discover -s tests -p "test*.py"
+
+      - name: Prepare release payload and icon
+        shell: pwsh
+        run: |
+          Remove-Item release-payload, dist -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory release-payload | Out-Null
+          foreach ($item in @("src", "scripts", "assets", ".env.example", "pyproject.toml", "README.md")) {
+            Copy-Item $item release-payload -Recurse -Force
+          }
+          $icon = "assets\ai-aharon.ico"
+          if (-not (Test-Path $icon)) {
+            $encoded = (Get-Content "assets\ai-aharon.ico.b64" -Raw).Trim()
+            [IO.File]::WriteAllBytes($icon, [Convert]::FromBase64String($encoded))
+          }
+
+      - name: Bundle private Python runtime
+        shell: pwsh
+        run: |
+          $basePython = (python -c "import sys; print(sys.base_prefix)").Trim()
+          $runtime = "release-payload\python-runtime"
+          New-Item -ItemType Directory $runtime | Out-Null
+          & robocopy.exe $basePython $runtime /E /R:2 /W:1 /XD __pycache__ /XF *.pyc
+          if ($LASTEXITCODE -ge 8) { throw "Copying Python runtime failed: $LASTEXITCODE" }
+          & "$runtime\python.exe" -m pip install --disable-pip-version-check --upgrade pip
+          & "$runtime\python.exe" -m pip install --disable-pip-version-check ".[realtime]"
+          if ($LASTEXITCODE -ne 0) { throw "Installing bundled dependencies failed" }
+
+          $serviceExe = Get-ChildItem "$runtime\Lib\site-packages" -Filter pythonservice.exe -Recurse | Select-Object -First 1
+          if ($null -eq $serviceExe) { throw "pythonservice.exe was not installed by pywin32" }
+          Copy-Item $serviceExe.FullName "$runtime\pythonservice.exe" -Force
+          $system32 = "$runtime\Lib\site-packages\pywin32_system32"
+          if (Test-Path $system32) {
+            Copy-Item "$system32\*.dll" $runtime -Force
+          }
+
+      - name: Bundle FFmpeg and FFplay
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          $expanded = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile $zip
+          Expand-Archive $zip $expanded -Force
+          $bin = Get-ChildItem $expanded -Directory | Select-Object -First 1 | ForEach-Object { Join-Path $_.FullName "bin" }
+          New-Item -ItemType Directory "release-payload\tools" | Out-Null
+          foreach ($name in @("ffmpeg.exe", "ffplay.exe", "ffprobe.exe")) {
+            Copy-Item (Join-Path $bin $name) "release-payload\tools\$name" -Force
+          }
+
+      - name: Build desktop launcher
+        shell: pwsh
+        run: |
+          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $csc)) { throw "C# compiler not found: $csc" }
+          & $csc /nologo /target:winexe /platform:x64 /reference:System.Windows.Forms.dll /win32icon:assets\ai-aharon.ico /out:release-payload\AI-Aharon.exe installer\launcher.cs
+          if ($LASTEXITCODE -ne 0) { throw "Launcher compilation failed" }
+
+      - name: Install Inno Setup if needed
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DMyAppVersion=$env:VERSION" "installer\AI-Aharon.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - name: Optionally sign installer
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.WINDOWS_CERT_PFX_B64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PFX_B64)) {
+            Write-Host "No signing certificate configured; installer will be unsigned."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
+            Where-Object FullName -Match 'x64' | Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $signtool) { throw "signtool.exe not found" }
+          $installer = "dist\AI-Aharon-Setup-$env:VERSION.exe"
+          & $signtool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $pfx /p $env:PFX_PASSWORD $installer
+          if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed" }
+          Remove-Item $pfx -Force
+
+      - name: Generate update metadata
+        shell: pwsh
+        run: |
+          $name = "AI-Aharon-Setup-$env:VERSION.exe"
+          $installer = "dist\$name"
+          $sha = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $url = "https://github.com/${{ github.repository }}/releases/download/$env:TAG_NAME/$name"
+          [ordered]@{
+            version = $env:VERSION
+            url = $url
+            sha256 = $sha
+            mandatory = $false
+            notes = "AI Aharon $env:VERSION"
+          } | ConvertTo-Json | Set-Content "dist\update.json" -Encoding utf8
+          "$sha  $name" | Set-Content "dist\checksums.sha256" -Encoding ascii
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Aharon-Windows-${{ env.VERSION }}
+          path: |
+            dist/AI-Aharon-Setup-${{ env.VERSION }}.exe
+            dist/update.json
+            dist/checksums.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = @(
+            "dist\AI-Aharon-Setup-$env:VERSION.exe",
+            "dist\update.json",
+            "dist\checksums.sha256"
+          )
+          gh release view $env:TAG_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:TAG_NAME @files --clobber
+          } else {
+            gh release create $env:TAG_NAME @files --generate-notes --title "AI Aharon $env:VERSION"
+          }
