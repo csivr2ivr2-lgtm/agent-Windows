@@ -17,27 +17,31 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
 OutputBaseFilename=AI-Aharon-Setup-{#MyAppVersion}
+SetupIconFile=..\assets\ai-aharon.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayName=AI Aharon
 SetupLogging=yes
 CloseApplications=yes
 RestartApplications=no
+UsePreviousAppDir=yes
 
 [Files]
 Source: "..\release-payload\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Dirs]
-Name: "{commonappdata}\AgentWindowsAI"; Permissions: admins-full system-full
-Name: "{commonappdata}\AgentWindowsAI\data"; Permissions: admins-full system-full
+Name: "{commonappdata}\AgentWindowsAI"
+Name: "{commonappdata}\AgentWindowsAI\data"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
+Name: "autostart"; Description: "Start AI Aharon when I sign in"; GroupDescription: "Startup:"; Flags: checkedonce
 
 [Icons]
 Name: "{group}\AI Aharon"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\AI Aharon"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
-
-[Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
+Name: "{userstartup}\AI Aharon"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--minimized"; Tasks: autostart
 
 [Run]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File \"{app}\scripts\installer-apply.ps1\" -InstallRoot \"{app}\""; Flags: runhidden waituntilterminated

@@ -71,6 +71,9 @@ if sys.platform.startswith("win"):
                 root = _project_root()
                 previous_cwd = Path.cwd()
                 os.environ.setdefault("AGENT_WINDOWS_HOME", str(root))
+                bundled_tools = root / "tools"
+                if bundled_tools.is_dir():
+                    os.environ["PATH"] = str(bundled_tools) + os.pathsep + os.environ.get("PATH", "")
                 os.chdir(root)
                 try:
                     settings = Settings.from_env(root / ".env")

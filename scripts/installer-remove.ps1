@@ -5,7 +5,9 @@ param(
 $ErrorActionPreference = 'SilentlyContinue'
 $ServiceName = 'AgentWindowsAI'
 $ServiceRoot = Join-Path $env:ProgramData $ServiceName
-$RuntimePython = Join-Path $ServiceRoot 'python-runtime\python.exe'
+$RuntimeRoot = Join-Path $ServiceRoot 'python-runtime'
+$ToolsRoot = Join-Path $ServiceRoot 'tools'
+$RuntimePython = Join-Path $RuntimeRoot 'python.exe'
 
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($null -ne $svc) {
@@ -20,5 +22,7 @@ if ($null -ne $svc) {
     }
 }
 
-# Intentionally preserve %ProgramData%\AgentWindowsAI\data and .env so a reinstall
-# or upgrade does not destroy memory, settings, API keys, or user state.
+# Remove replaceable binaries, but intentionally keep .env and data/memory so a
+# reinstall can restore the user's configuration and long-term context.
+Remove-Item -Path $RuntimeRoot -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Path $ToolsRoot -Recurse -Force -ErrorAction SilentlyContinue
