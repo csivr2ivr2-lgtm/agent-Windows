@@ -105,19 +105,29 @@ jobs:
         if: env.CODACY_PROJECT_TOKEN != ''
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           codacy issues gh csivr2ivr2-lgtm agent-Windows \
             --branch installer-updater \
             --categories Security \
             --output json \
-            > codacy-security.json
-          jq 'if type == "array" then .[:40] elif .data then .data[:40] else . end' \
-            codacy-security.json > codacy-security-summary.json
+            > codacy-security.txt 2>&1
+          status=$?
+          codacy issues --help > codacy-help.txt 2>&1
           {
             echo '### Temporary Codacy security diagnostic'
             echo
-            echo '```json'
-            cat codacy-security-summary.json
+            echo "Command exit code: $status"
+            echo
+            echo '```text'
+            head -n 160 codacy-security.txt
             echo '```'
+            if [ "$status" -ne 0 ]; then
+              echo
+              echo '#### CLI help'
+              echo '```text'
+              head -n 160 codacy-help.txt
+              echo '```'
+            fi
           } > codacy-comment.md
           gh pr comment "$PR_NUMBER" --body-file codacy-comment.md
+          exit 0
