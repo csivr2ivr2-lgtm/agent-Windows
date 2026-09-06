@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import urllib.error
 import urllib.request
@@ -14,6 +15,10 @@ from urllib.parse import urlparse
 
 _REPOSITORY = "csivr2ivr2-lgtm/agent-Windows"
 DEFAULT_UPDATE_URL = f"https://github.com/{_REPOSITORY}/releases/latest/download/update.json"
+DEFAULT_INSTALLER_URL = (
+    f"https://github.com/{_REPOSITORY}/releases/latest/download/AI-Aharon-Setup.exe"
+)
+_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?$")
 _INSTALLER_NAME = re.compile(
     r"^AI-Aharon-Setup-[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?\.exe$"
 )
@@ -86,31 +91,6 @@ def is_newer(candidate: str, installed: str) -> bool:
     return _version_tuple(candidate) > _version_tuple(installed)
 
 
-def _require_official_release_url(value: str, *, metadata_file: bool = False) -> str:
-    """Accept only this project's HTTPS GitHub release endpoints."""
-    parsed = urlparse(value)
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != "github.com"
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError("update URL must be an HTTPS GitHub release URL")
-    prefix = f"/{_REPOSITORY}/releases/"
-    if not parsed.path.startswith(prefix):
-        raise ValueError("update URL must belong to the official AI Aharon repository")
-    if metadata_file:
-        if not parsed.path.endswith("/download/update.json"):
-            raise ValueError("update metadata URL must point to update.json")
-    else:
-        name = Path(parsed.path).name
-        if "/download/" not in parsed.path or not _INSTALLER_NAME.fullmatch(name):
-            raise ValueError("update installer URL has an invalid release asset name")
-    return value
-
-
 def _validate_final_download_url(value: str) -> None:
     parsed = urlparse(value)
     host = (parsed.hostname or "").casefold()
@@ -124,10 +104,16 @@ def _validate_final_download_url(value: str) -> None:
         raise ValueError("GitHub redirected the update to an untrusted destination")
 
 
-def check_for_update(url: str | None = None, *, timeout: float = 5.0) -> UpdateInfo | None:
-    endpoint = _require_official_release_url(url or DEFAULT_UPDATE_URL, metadata_file=True)
+def _validate_sha256(value: str) -> str:
+    digest = value.strip().casefold()
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("invalid update SHA-256")
+    return digest
+
+
+def check_for_update(*, timeout: float = 5.0) -> UpdateInfo | None:
     request = urllib.request.Request(
-        endpoint,
+        DEFAULT_UPDATE_URL,
         headers={"Accept": "application/json", "User-Agent": "AI-Aharon-Updater/1"},
     )
     with _opener().open(request, timeout=timeout) as response:
@@ -138,31 +124,40 @@ def check_for_update(url: str | None = None, *, timeout: float = 5.0) -> UpdateI
     payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("update metadata must be a JSON object")
+
+    version = str(payload["version"]).strip().lstrip("vV")
+    if not _VERSION.fullmatch(version):
+        raise ValueError("invalid update version")
+    if "url" in payload and str(payload["url"]).strip() != DEFAULT_INSTALLER_URL:
+        raise ValueError("update metadata attempted to override the official installer URL")
+
     info = UpdateInfo(
-        version=str(payload["version"]).strip().lstrip("vV"),
-        url=str(payload["url"]).strip(),
-        sha256=str(payload["sha256"]).strip().casefold(),
+        version=version,
+        url=DEFAULT_INSTALLER_URL,
+        sha256=_validate_sha256(str(payload["sha256"])),
         mandatory=bool(payload.get("mandatory", False)),
         notes=str(payload.get("notes", "")).strip()[:4000],
     )
-    _require_official_release_url(info.url)
-    if len(info.sha256) != 64 or any(c not in "0123456789abcdef" for c in info.sha256):
-        raise ValueError("invalid update SHA-256")
     return info if is_newer(info.version, current_version()) else None
 
 
 def download_update(info: UpdateInfo, *, timeout: float = 60.0) -> Path:
-    _require_official_release_url(info.url)
+    if info.url != DEFAULT_INSTALLER_URL:
+        raise ValueError("refusing a non-official installer URL")
+    if not _VERSION.fullmatch(info.version):
+        raise ValueError("invalid installer version")
+    expected_sha = _validate_sha256(info.sha256)
     expected_name = f"AI-Aharon-Setup-{info.version}.exe"
-    if Path(urlparse(info.url).path).name != expected_name:
-        raise ValueError("installer asset version does not match update metadata")
-    target = Path(tempfile.gettempdir()) / expected_name
-    partial = target.with_suffix(target.suffix + ".part")
-    request = urllib.request.Request(info.url, headers={"User-Agent": "AI-Aharon-Updater/1"})
+    staging = Path(tempfile.mkdtemp(prefix="AI-Aharon-Update-"))
+    target = staging / expected_name
+    partial = staging / (expected_name + ".part")
+    request = urllib.request.Request(
+        DEFAULT_INSTALLER_URL, headers={"User-Agent": "AI-Aharon-Updater/1"}
+    )
     digest = hashlib.sha256()
     total = 0
     try:
-        with _opener().open(request, timeout=timeout) as response, partial.open("wb") as output:
+        with _opener().open(request, timeout=timeout) as response, partial.open("xb") as output:
             _validate_final_download_url(response.geturl())
             declared = response.headers.get("Content-Length")
             if declared is not None and int(declared) > _MAX_INSTALLER_BYTES:
@@ -176,24 +171,32 @@ def download_update(info: UpdateInfo, *, timeout: float = 60.0) -> Path:
                     raise ValueError("update installer exceeded the download limit")
                 output.write(chunk)
                 digest.update(chunk)
-        if digest.hexdigest().casefold() != info.sha256:
+        if digest.hexdigest().casefold() != expected_sha:
             raise ValueError("downloaded installer failed SHA-256 verification")
         os.replace(partial, target)
         return target
     except Exception:
-        partial.unlink(missing_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
         raise
 
 
-def launch_installer(path: str | Path) -> None:  # pragma: no cover - Windows-only launch
+def launch_installer(path: str | Path, *, expected_sha256: str) -> None:  # pragma: no cover - Windows-only launch
     candidate = Path(path).resolve()
     temp_root = Path(tempfile.gettempdir()).resolve()
     if (
-        candidate.parent != temp_root
+        candidate.parent.parent != temp_root
+        or not candidate.parent.name.startswith("AI-Aharon-Update-")
         or not candidate.is_file()
         or not _INSTALLER_NAME.fullmatch(candidate.name)
     ):
         raise ValueError("refusing to launch an untrusted installer path")
+    expected = _validate_sha256(expected_sha256)
+    digest = hashlib.sha256()
+    with candidate.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest().casefold() != expected:
+        raise ValueError("installer changed after download verification")
     if os.name != "nt" or not hasattr(os, "startfile"):
         raise RuntimeError("the Windows installer can only be launched on Windows")
     os.startfile(str(candidate))  # type: ignore[attr-defined]
