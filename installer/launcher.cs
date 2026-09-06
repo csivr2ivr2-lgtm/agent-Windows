@@ -38,10 +38,13 @@ internal static class Program
         var command = new StringBuilder();
         command.Append("-m agent_windows.desktop_gui --env ");
         command.Append(Quote(envFile));
-        foreach (string arg in args)
+        bool minimized = Array.Exists(
+            args,
+            arg => String.Equals(arg, "--minimized", StringComparison.Ordinal)
+        );
+        if (minimized)
         {
-            command.Append(' ');
-            command.Append(Quote(arg));
+            command.Append(" --minimized");
         }
 
         var start = new ProcessStartInfo();

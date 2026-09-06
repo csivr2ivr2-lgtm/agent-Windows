@@ -44,11 +44,11 @@ Name: "{autodesktop}\AI Aharon"; Filename: "{app}\{#MyAppExeName}"; Tasks: deskt
 Name: "{userstartup}\AI Aharon"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--minimized"; Tasks: autostart
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File \"{app}\scripts\installer-apply.ps1\" -InstallRoot \"{app}\""; Flags: runhidden waituntilterminated
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -File \"{app}\scripts\installer-apply.ps1\" -InstallRoot \"{app}\""; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch AI Aharon"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File \"{app}\scripts\installer-remove.ps1\" -InstallRoot \"{app}\""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAgentWindowsService"
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -File \"{app}\scripts\installer-remove.ps1\" -InstallRoot \"{app}\""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAgentWindowsService"
 
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;
