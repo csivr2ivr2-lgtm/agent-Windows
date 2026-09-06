@@ -194,8 +194,13 @@ jobs:
         run: |
           $name = "AI-Aharon-Setup-$env:VERSION.exe"
           $installer = "dist\$name"
+          $stableName = "AI-Aharon-Setup.exe"
+          $stableInstaller = "dist\$stableName"
+          Copy-Item $installer $stableInstaller -Force
           $sha = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          $url = "https://github.com/$env:REPOSITORY/releases/download/$env:TAG_NAME/$name"
+          $stableSha = (Get-FileHash $stableInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne $stableSha) { throw "Stable installer alias hash mismatch" }
+          $url = "https://github.com/$env:REPOSITORY/releases/latest/download/$stableName"
           [ordered]@{
             version = $env:VERSION
             url = $url
@@ -203,7 +208,10 @@ jobs:
             mandatory = $false
             notes = "AI Aharon $env:VERSION"
           } | ConvertTo-Json | Set-Content "dist\update.json" -Encoding utf8
-          "$sha  $name" | Set-Content "dist\checksums.sha256" -Encoding ascii
+          @(
+            "$sha  $name",
+            "$sha  $stableName"
+          ) | Set-Content "dist\checksums.sha256" -Encoding ascii
 
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -211,6 +219,7 @@ jobs:
           name: AI-Aharon-Windows-${{ env.VERSION }}
           path: |
             dist/AI-Aharon-Setup-${{ env.VERSION }}.exe
+            dist/AI-Aharon-Setup.exe
             dist/update.json
             dist/checksums.sha256
           if-no-files-found: error
@@ -238,6 +247,7 @@ jobs:
         run: |
           files=(
             "dist/AI-Aharon-Setup-$VERSION.exe"
+            "dist/AI-Aharon-Setup.exe"
             "dist/update.json"
             "dist/checksums.sha256"
           )
