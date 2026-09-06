@@ -185,19 +185,19 @@ class AgentDesktopApp:
         ).pack(pady=(8, 4))
         ttk.Label(outer, text="Ctrl + Alt + Space פותח שיחה קולית מכל מקום", anchor="center", style="Header.TLabel").pack(fill="x", pady=(14, 0))
 
-    def _open_settings(self) -> None:
+    def _open_settings(self) -> None:  # pragma: no cover - Tk callback
         from .settings_ui import show_settings_window
 
         show_settings_window(self.root, self.env_path, on_saved=self._settings_saved)
 
-    def _settings_saved(self) -> None:
+    def _settings_saved(self) -> None:  # pragma: no cover - Tk callback
         self.service_label.configure(text="● ההגדרות נשמרו — נדרש אתחול")
 
-    def _auto_check_update(self) -> None:
+    def _auto_check_update(self) -> None:  # pragma: no cover - Tk callback
         if not self._closing.is_set():
             self._check_update(manual=False)
 
-    def _check_update(self, *, manual: bool) -> None:
+    def _check_update(self, *, manual: bool) -> None:  # pragma: no cover - threaded Tk callback
         from tkinter import messagebox
         from .updater import check_for_update, current_version, download_update, launch_installer
 
