@@ -36,6 +36,7 @@ HEBREW_LABELS = {
     "connected": "שירות מחובר",
     "disconnected": "שירות לא זמין",
     "voice_only": "שיחה קולית רציפה",
+    "hint": "אין צורך ללחוץ כדי לדבר — השיחה רציפה.",
     "end": "סיום שיחה",
 }
 
@@ -119,11 +120,11 @@ class AgentDesktopApp:
         root.after(2500, self._auto_check_update)
         needs_setup = not any(
             (
-                settings.groq_key,
-                settings.gemini_key,
-                settings.openrouter_key,
-                settings.local_llm_url,
-                settings.relay_url,
+                getattr(settings, "groq_key", ""),
+                getattr(settings, "gemini_key", ""),
+                getattr(settings, "openrouter_key", ""),
+                getattr(settings, "local_llm_url", ""),
+                getattr(settings, "relay_url", ""),
             )
         )
         if needs_setup:
@@ -150,8 +151,11 @@ class AgentDesktopApp:
         ttk.Label(header, text=APP_NAME, font=("Segoe UI", 21, "bold"), style="Header.TLabel").pack(side="right")
         self.service_label = ttk.Label(header, text="בודק חיבור…", style="Header.TLabel")
         self.service_label.pack(side="left")
-        ttk.Button(header, text="⚙ הגדרות", command=self._open_settings).pack(side="left", padx=(8, 0))
-        ttk.Button(header, text="↻ עדכון", command=lambda: self._check_update(manual=True)).pack(
+        button_cls = getattr(ttk, "Button", tk.Button)
+        button_cls(header, text="⚙ הגדרות", command=self._open_settings).pack(
+            side="left", padx=(8, 0)
+        )
+        button_cls(header, text="↻ עדכון", command=lambda: self._check_update(manual=True)).pack(
             side="left", padx=(8, 0)
         )
 
