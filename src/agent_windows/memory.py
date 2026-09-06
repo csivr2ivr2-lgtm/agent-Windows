@@ -16,7 +16,7 @@ def _tokens(text: str, *, limit: int = 12) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for token in _TOKEN_RE.findall(text.casefold()):
-        if len(token) <= 2 or token in seen:
+        if token in seen or (len(token) <= 2 and not token.isdigit()):
             continue
         seen.add(token)
         result.append(token)

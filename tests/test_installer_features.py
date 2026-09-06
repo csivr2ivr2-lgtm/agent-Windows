@@ -52,6 +52,15 @@ class MemoryRankingTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_numeric_memory_tokens_are_searchable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMemoryStore(Path(directory) / "memory.sqlite3")
+            try:
+                store.remember("The tool returned 17:30", metadata={"kind": "turn"})
+                self.assertEqual(store.search("17:30"), ["The tool returned 17:30"])
+            finally:
+                store.close()
+
     def test_durable_user_fact_detection(self):
         self.assertTrue(AgentLoop._durable_user_memory("אני מעדיף תשובות קצרות"))
         self.assertTrue(AgentLoop._durable_user_memory("Remember that my project uses Windows"))
