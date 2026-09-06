@@ -19,6 +19,7 @@ DEFAULT_INSTALLER_URL = (
     f"https://github.com/{_REPOSITORY}/releases/latest/download/AI-Aharon-Setup.exe"
 )
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?$")
+_STAGING_DIR = re.compile(r"^AI-Aharon-Update-([0-9a-f]{64})-.+$")
 _INSTALLER_NAME = re.compile(
     r"^AI-Aharon-Setup-[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?\.exe$"
 )
@@ -148,7 +149,7 @@ def download_update(info: UpdateInfo, *, timeout: float = 60.0) -> Path:
         raise ValueError("invalid installer version")
     expected_sha = _validate_sha256(info.sha256)
     expected_name = f"AI-Aharon-Setup-{info.version}.exe"
-    staging = Path(tempfile.mkdtemp(prefix="AI-Aharon-Update-"))
+    staging = Path(tempfile.mkdtemp(prefix=f"AI-Aharon-Update-{expected_sha}-"))
     target = staging / expected_name
     partial = staging / (expected_name + ".part")
     request = urllib.request.Request(
@@ -180,17 +181,18 @@ def download_update(info: UpdateInfo, *, timeout: float = 60.0) -> Path:
         raise
 
 
-def launch_installer(path: str | Path, *, expected_sha256: str) -> None:  # pragma: no cover - Windows-only launch
+def launch_installer(path: str | Path) -> None:  # pragma: no cover - Windows-only launch
     candidate = Path(path).resolve()
     temp_root = Path(tempfile.gettempdir()).resolve()
+    staging_match = _STAGING_DIR.fullmatch(candidate.parent.name)
     if (
         candidate.parent.parent != temp_root
-        or not candidate.parent.name.startswith("AI-Aharon-Update-")
+        or staging_match is None
         or not candidate.is_file()
         or not _INSTALLER_NAME.fullmatch(candidate.name)
     ):
         raise ValueError("refusing to launch an untrusted installer path")
-    expected = _validate_sha256(expected_sha256)
+    expected = staging_match.group(1)
     digest = hashlib.sha256()
     with candidate.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
