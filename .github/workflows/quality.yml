@@ -85,3 +85,53 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: php -l relay/public/index.php
       - run: php -l relay/src/ProviderForwarder.php
+
+  codacy-security-diagnostic:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      CODACY_PROJECT_TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Read Codacy security findings for this repository
+        if: env.CODACY_PROJECT_TOKEN != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            -X POST \
+            'https://app.codacy.com/api/v3/analysis/organizations/gh/csivr2ivr2-lgtm/repositories/agent-Windows/issues/search?limit=1000' \
+            -H "project-token: $CODACY_PROJECT_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{"categories":["Security"]}' \
+            > codacy-security.json
+
+          jq --arg sha "$HEAD_SHA" '
+            [.data[] | {
+              pattern: (.patternInfo.id // .patternInfo.title // "unknown"),
+              level: (.patternInfo.level // .level // "unknown"),
+              file: (.filePath // ""),
+              line: (.lineNumber // .line // .location.line // null),
+              sha: (.commitInfo.sha // .commitInfo.commitSha // .commitSha // ""),
+              message: (.message // .patternInfo.title // "")
+            }] as $all
+            | ($all | map(select(.sha == $sha))) as $head
+            | if ($head | length) > 0 then $head else $all end
+            | .[:40]
+          ' codacy-security.json > codacy-security-summary.json
+
+          {
+            echo '### Temporary Codacy security diagnostic'
+            echo
+            echo "Head: \`$HEAD_SHA\`"
+            echo
+            echo '```json'
+            cat codacy-security-summary.json
+            echo '```'
+          } > codacy-comment.md
+          gh pr comment "$PR_NUMBER" --body-file codacy-comment.md
