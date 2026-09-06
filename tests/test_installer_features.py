@@ -41,13 +41,21 @@ class MemoryRankingTests(unittest.TestCase):
                 "CREATE TABLE memories(id INTEGER PRIMARY KEY, text TEXT UNIQUE NOT NULL, "
                 "created REAL NOT NULL, metadata TEXT)"
             )
-            db.execute("INSERT INTO memories(text,created,metadata) VALUES(?,?,?)", ("hello world", time.time(), "{}"))
+            db.execute(
+                "INSERT INTO memories(text,created,metadata) VALUES(?,?,?)",
+                ("hello world", time.time(), "{}"),
+            )
             db.commit()
             db.close()
             store = SQLiteMemoryStore(path)
             try:
-                columns = {row[1] for row in store._database().execute("PRAGMA table_info(memories)")}
-                self.assertTrue({"kind", "importance", "last_accessed", "access_count"} <= columns)
+                columns = {
+                    row[1]
+                    for row in store._database().execute("PRAGMA table_info(memories)")
+                }
+                self.assertTrue(
+                    {"kind", "importance", "last_accessed", "access_count"} <= columns
+                )
                 self.assertEqual(list(store.search("hello world")), ["hello world"])
             finally:
                 store.close()
@@ -63,7 +71,9 @@ class MemoryRankingTests(unittest.TestCase):
 
     def test_durable_user_fact_detection(self):
         self.assertTrue(AgentLoop._durable_user_memory("אני מעדיף תשובות קצרות"))
-        self.assertTrue(AgentLoop._durable_user_memory("Remember that my project uses Windows"))
+        self.assertTrue(
+            AgentLoop._durable_user_memory("Remember that my project uses Windows")
+        )
         self.assertFalse(AgentLoop._durable_user_memory("what time is it"))
 
     def test_history_is_used_for_memory_query(self):
@@ -89,8 +99,12 @@ class SettingsFileTests(unittest.TestCase):
     def test_updates_preserve_unknown_values_and_comments(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / ".env"
-            path.write_text("# keep me\nOTHER=value\nGROQ_API_KEY=old\n", encoding="utf-8")
-            update_env_file(path, {"GROQ_API_KEY": "new secret", "GEMINI_API_KEY": "gemini"})
+            path.write_text(
+                "# keep me\nOTHER=value\nGROQ_API_KEY=old\n", encoding="utf-8"
+            )
+            update_env_file(
+                path, {"GROQ_API_KEY": "new secret", "GEMINI_API_KEY": "gemini"}
+            )
             values = read_env_file(path)
             self.assertEqual(values["OTHER"], "value")
             self.assertEqual(values["GROQ_API_KEY"], "new secret")
@@ -116,10 +130,17 @@ class UpdaterTests(unittest.TestCase):
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.read.return_value = payload
-        with mock.patch("agent_windows.updater.urllib.request.urlopen", return_value=response), mock.patch(
-            "agent_windows.updater.current_version", return_value="1.0.0"
-        ):
-            info = check_for_update("https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/latest/download/update.json")
+        response.geturl.return_value = (
+            "https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/latest/download/update.json"
+        )
+        opener = mock.MagicMock()
+        opener.open.return_value = response
+        with mock.patch(
+            "agent_windows.updater._opener", return_value=opener
+        ), mock.patch("agent_windows.updater.current_version", return_value="1.0.0"):
+            info = check_for_update(
+                "https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/latest/download/update.json"
+            )
         self.assertIsNotNone(info)
         self.assertEqual(info.version, "99.0.0")
 
@@ -137,9 +158,13 @@ class UpdaterTests(unittest.TestCase):
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.read.side_effect = [content, b""]
+        response.geturl.return_value = info.url
+        response.headers = {}
+        opener = mock.MagicMock()
+        opener.open.return_value = response
         with tempfile.TemporaryDirectory() as directory, mock.patch(
             "agent_windows.updater.tempfile.gettempdir", return_value=directory
-        ), mock.patch("agent_windows.updater.urllib.request.urlopen", return_value=response):
+        ), mock.patch("agent_windows.updater._opener", return_value=opener):
             path = download_update(info)
             self.assertEqual(path.read_bytes(), content)
 
@@ -153,12 +178,54 @@ class UpdaterTests(unittest.TestCase):
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.read.side_effect = [content, b""]
+        response.geturl.return_value = info.url
+        response.headers = {}
+        opener = mock.MagicMock()
+        opener.open.return_value = response
         with tempfile.TemporaryDirectory() as directory, mock.patch(
             "agent_windows.updater.tempfile.gettempdir", return_value=directory
-        ), mock.patch("agent_windows.updater.urllib.request.urlopen", return_value=response):
+        ), mock.patch("agent_windows.updater._opener", return_value=opener):
             with self.assertRaises(ValueError):
                 download_update(info)
             self.assertFalse(any(Path(directory).iterdir()))
+
+
+class DistributionHardeningTests(unittest.TestCase):
+    def test_launcher_whitelists_only_minimized_argument_and_sets_tools_path(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "installer" / "launcher.cs").read_text(encoding="utf-8")
+        self.assertNotIn("foreach (string arg in args)", source)
+        self.assertIn(
+            'String.Equals(arg, "--minimized", StringComparison.Ordinal)', source
+        )
+        self.assertIn('start.EnvironmentVariables["PATH"] = tools + ";"', source)
+        self.assertIn("start.UseShellExecute = false", source)
+
+    def test_installer_does_not_bypass_powershell_execution_policy(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "installer" / "AI-Aharon.iss").read_text(encoding="utf-8")
+        self.assertNotIn("ExecutionPolicy Bypass", source)
+        self.assertIn("-NoProfile -NonInteractive -File", source)
+
+    def test_history_memory_query_uses_only_last_six_history_messages(self):
+        memory = mock.MagicMock()
+        memory.search.return_value = []
+        loop = AgentLoop(
+            mock.MagicMock(), memory, mock.MagicMock(), system_prompt="system"
+        )
+        history = [Message("user", f"history-{index}") for index in range(8)]
+        loop._initial_messages("continue", history)
+        query = memory.search.call_args.args[0]
+        self.assertNotIn("history-0", query)
+        self.assertNotIn("history-1", query)
+        for index in range(2, 8):
+            self.assertIn(f"history-{index}", query)
+
+    def test_updater_rejects_non_github_redirect_destination(self):
+        from agent_windows.updater import _validate_final_download_url
+
+        with self.assertRaises(ValueError):
+            _validate_final_download_url("https://example.invalid/release.exe")
 
 
 if __name__ == "__main__":
