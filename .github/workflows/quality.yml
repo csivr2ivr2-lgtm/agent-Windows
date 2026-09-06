@@ -92,67 +92,54 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PROJECT_KEY: csivr2ivr2-lgtm_agent-Windows
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
     steps:
-      - name: Query SonarCloud issues for this PR
+      - name: Query authenticated SonarCloud issues for this PR
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PROJECT_KEY: csivr2ivr2-lgtm_agent-Windows
         run: |
-          set -u
+          set -euo pipefail
+          if [ -z "$SONAR_TOKEN" ]; then
+            printf '### SonarCloud diagnostic (temporary)\n\n`SONAR_TOKEN` is not configured as a repository secret.\n' > sonar-summary.md
+            gh pr comment "$PR_NUMBER" --body-file sonar-summary.md
+            exit 0
+          fi
+          auth_header="Authorization: Bearer $SONAR_TOKEN"
           issues_url="https://sonarcloud.io/api/issues/search?componentKeys=${PROJECT_KEY}&pullRequest=${PR_NUMBER}&resolved=false&ps=100"
           hotspots_url="https://sonarcloud.io/api/hotspots/search?projectKey=${PROJECT_KEY}&pullRequest=${PR_NUMBER}&ps=100"
-          issues_status=$(curl --silent --show-error --location --output sonar-issues.json --write-out '%{http_code}' "$issues_url" || true)
-          hotspots_status=$(curl --silent --show-error --location --output sonar-hotspots.json --write-out '%{http_code}' "$hotspots_url" || true)
-          python - "$issues_status" "$hotspots_status" <<'PY' > sonar-summary.md
+          curl --fail --silent --show-error --location -H "$auth_header" "$issues_url" -o sonar-issues.json
+          curl --fail --silent --show-error --location -H "$auth_header" "$hotspots_url" -o sonar-hotspots.json || printf '{"hotspots":[]}\n' > sonar-hotspots.json
+          python - <<'PY' > sonar-summary.md
           import json
-          import sys
           from pathlib import Path
 
-          issues_status, hotspots_status = sys.argv[1:3]
+          issues = json.loads(Path("sonar-issues.json").read_text())
+          hotspots = json.loads(Path("sonar-hotspots.json").read_text())
           print("### SonarCloud diagnostic (temporary)")
           print()
-          print(f"issues/search HTTP: `{issues_status}`")
-          print(f"hotspots/search HTTP: `{hotspots_status}`")
-
-          def load(path):
-              try:
-                  return json.loads(Path(path).read_text())
-              except Exception:
-                  return None
-
-          issues = load("sonar-issues.json")
-          hotspots = load("sonar-hotspots.json")
-          if isinstance(issues, dict):
-              print()
-              print(f"Open issues: {issues.get('total', len(issues.get('issues', [])))}")
-              for item in issues.get("issues", []):
-                  component = item.get("component", "")
-                  path = component.split(":", 1)[-1]
-                  line = item.get("line", "?")
-                  severity = item.get("severity", "?")
-                  issue_type = item.get("type", "?")
-                  rule = item.get("rule", "?")
-                  message = item.get("message", "")
-                  print(f"- **{severity} {issue_type}** `{path}:{line}` `{rule}` — {message}")
-          else:
-              raw = Path("sonar-issues.json").read_text(errors="replace")[:1500] if Path("sonar-issues.json").exists() else "<no body>"
-              print("\nissues/search response:\n```text\n" + raw + "\n```")
-          if isinstance(hotspots, dict):
-              hs = hotspots.get("hotspots", [])
-              print()
-              print(f"Security hotspots: {len(hs)}")
-              for item in hs:
-                  component = item.get("component", "")
-                  path = component.split(":", 1)[-1]
-                  line = item.get("line", "?")
-                  status = item.get("status", "?")
-                  rule = item.get("ruleKey", "?")
-                  message = item.get("message", "")
-                  print(f"- **{status}** `{path}:{line}` `{rule}` — {message}")
-          else:
-              raw = Path("sonar-hotspots.json").read_text(errors="replace")[:1500] if Path("sonar-hotspots.json").exists() else "<no body>"
-              print("\nhotspots/search response:\n```text\n" + raw + "\n```")
+          print(f"Open issues: {issues.get('total', len(issues.get('issues', [])))}")
+          for item in issues.get("issues", []):
+              component = item.get("component", "")
+              path = component.split(":", 1)[-1]
+              line = item.get("line", "?")
+              severity = item.get("severity", item.get("impacts", "?"))
+              issue_type = item.get("type", "?")
+              rule = item.get("rule", "?")
+              message = item.get("message", "")
+              print(f"- **{severity} {issue_type}** `{path}:{line}` `{rule}` — {message}")
+          hs = hotspots.get("hotspots", [])
+          print()
+          print(f"Security hotspots: {len(hs)}")
+          for item in hs:
+              component = item.get("component", "")
+              path = component.split(":", 1)[-1]
+              line = item.get("line", "?")
+              status = item.get("status", "?")
+              rule = item.get("ruleKey", "?")
+              message = item.get("message", "")
+              print(f"- **{status}** `{path}:{line}` `{rule}` — {message}")
           PY
           gh pr comment "$PR_NUMBER" --body-file sonar-summary.md
