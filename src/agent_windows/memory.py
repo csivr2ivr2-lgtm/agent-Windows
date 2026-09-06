@@ -146,18 +146,14 @@ class SQLiteMemoryStore:
         terms = _tokens(query)
         if not terms or limit <= 0:
             return []
-        where = " OR ".join("text LIKE ? ESCAPE '\\'" for _ in terms)
-        escaped = [
-            term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            for term in terms
-        ]
-        candidate_limit = max(40, min(300, limit * 30))
+        # Keep the SQL statement static. With at most 5,000 local memories, ranking the
+        # bounded store in Python is inexpensive and avoids constructing SQL from query shape.
         with self._lock:
             with self._database() as db:
                 rows = db.execute(
-                    f"SELECT id,text,created,metadata,kind,importance,last_accessed,access_count "
-                    f"FROM memories WHERE {where} ORDER BY created DESC LIMIT ?",
-                    (*[f"%{term}%" for term in escaped], candidate_limit),
+                    "SELECT id,text,created,metadata,kind,importance,last_accessed,access_count "
+                    "FROM memories ORDER BY importance DESC, created DESC LIMIT ?",
+                    (self.max_items,),
                 ).fetchall()
                 ranked = self._rank(rows, query, terms)
                 selected = ranked[:limit]

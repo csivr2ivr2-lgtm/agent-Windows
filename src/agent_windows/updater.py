@@ -4,8 +4,8 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import tempfile
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from importlib import metadata
@@ -14,7 +14,18 @@ from urllib.parse import urlparse
 
 _REPOSITORY = "csivr2ivr2-lgtm/agent-Windows"
 DEFAULT_UPDATE_URL = f"https://github.com/{_REPOSITORY}/releases/latest/download/update.json"
-_INSTALLER_NAME = re.compile(r"^AI-Aharon-Setup-[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?\.exe$")
+_INSTALLER_NAME = re.compile(
+    r"^AI-Aharon-Setup-[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?\.exe$"
+)
+_GITHUB_DOWNLOAD_HOSTS = frozenset(
+    {
+        "github.com",
+        "release-assets.githubusercontent.com",
+        "objects.githubusercontent.com",
+    }
+)
+_MAX_METADATA_BYTES = 64 * 1024
+_MAX_INSTALLER_BYTES = 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -24,6 +35,33 @@ class UpdateInfo:
     sha256: str
     mandatory: bool = False
     notes: str = ""
+
+
+class _GitHubRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Allow redirects only to HTTPS hosts used by GitHub release assets."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlparse(newurl)
+        host = (parsed.hostname or "").casefold()
+        if (
+            parsed.scheme != "https"
+            or host not in _GITHUB_DOWNLOAD_HOSTS
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise urllib.error.HTTPError(
+                newurl,
+                code,
+                "refusing unsafe update redirect",
+                headers,
+                fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener():
+    return urllib.request.build_opener(_GitHubRedirectHandler())
 
 
 def current_version() -> str:
@@ -49,14 +87,16 @@ def is_newer(candidate: str, installed: str) -> bool:
 
 
 def _require_official_release_url(value: str, *, metadata_file: bool = False) -> str:
-    """Accept only this project's HTTPS GitHub release endpoints.
-
-    update.json is trusted only as release metadata for this repository. The installer URL
-    is validated again before download so a modified feed cannot point the updater at an
-    arbitrary executable.
-    """
+    """Accept only this project's HTTPS GitHub release endpoints."""
     parsed = urlparse(value)
-    if parsed.scheme != "https" or parsed.hostname != "github.com" or parsed.query or parsed.fragment:
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "github.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ValueError("update URL must be an HTTPS GitHub release URL")
     prefix = f"/{_REPOSITORY}/releases/"
     if not parsed.path.startswith(prefix):
@@ -71,21 +111,39 @@ def _require_official_release_url(value: str, *, metadata_file: bool = False) ->
     return value
 
 
+def _validate_final_download_url(value: str) -> None:
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").casefold()
+    if (
+        parsed.scheme != "https"
+        or host not in _GITHUB_DOWNLOAD_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValueError("GitHub redirected the update to an untrusted destination")
+
+
 def check_for_update(url: str | None = None, *, timeout: float = 5.0) -> UpdateInfo | None:
     endpoint = _require_official_release_url(url or DEFAULT_UPDATE_URL, metadata_file=True)
     request = urllib.request.Request(
         endpoint,
         headers={"Accept": "application/json", "User-Agent": "AI-Aharon-Updater/1"},
     )
-    # Bandit B310 is intentionally suppressed: the URL is restricted above to one HTTPS host/path.
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310  # NOSONAR
-        payload = json.loads(response.read().decode("utf-8"))
+    with _opener().open(request, timeout=timeout) as response:
+        _validate_final_download_url(response.geturl())
+        raw = response.read(_MAX_METADATA_BYTES + 1)
+    if len(raw) > _MAX_METADATA_BYTES:
+        raise ValueError("update metadata is unexpectedly large")
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("update metadata must be a JSON object")
     info = UpdateInfo(
         version=str(payload["version"]).strip().lstrip("vV"),
         url=str(payload["url"]).strip(),
         sha256=str(payload["sha256"]).strip().casefold(),
         mandatory=bool(payload.get("mandatory", False)),
-        notes=str(payload.get("notes", "")).strip(),
+        notes=str(payload.get("notes", "")).strip()[:4000],
     )
     _require_official_release_url(info.url)
     if len(info.sha256) != 64 or any(c not in "0123456789abcdef" for c in info.sha256):
@@ -102,30 +160,40 @@ def download_update(info: UpdateInfo, *, timeout: float = 60.0) -> Path:
     partial = target.with_suffix(target.suffix + ".part")
     request = urllib.request.Request(info.url, headers={"User-Agent": "AI-Aharon-Updater/1"})
     digest = hashlib.sha256()
-    # Bandit B310 is intentionally suppressed: the release URL is restricted above and the
-    # resulting bytes are additionally pinned to the SHA-256 from update.json.
-    with urllib.request.urlopen(request, timeout=timeout) as response, partial.open("wb") as output:  # nosec B310  # NOSONAR
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            output.write(chunk)
-            digest.update(chunk)
-    actual = digest.hexdigest().casefold()
-    if actual != info.sha256:
+    total = 0
+    try:
+        with _opener().open(request, timeout=timeout) as response, partial.open("wb") as output:
+            _validate_final_download_url(response.geturl())
+            declared = response.headers.get("Content-Length")
+            if declared is not None and int(declared) > _MAX_INSTALLER_BYTES:
+                raise ValueError("update installer is unexpectedly large")
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_INSTALLER_BYTES:
+                    raise ValueError("update installer exceeded the download limit")
+                output.write(chunk)
+                digest.update(chunk)
+        if digest.hexdigest().casefold() != info.sha256:
+            raise ValueError("downloaded installer failed SHA-256 verification")
+        os.replace(partial, target)
+        return target
+    except Exception:
         partial.unlink(missing_ok=True)
-        raise ValueError("downloaded installer failed SHA-256 verification")
-    os.replace(partial, target)
-    return target
+        raise
 
 
-def launch_installer(path: str | Path, *, silent: bool = False) -> None:  # pragma: no cover - Windows process launch
+def launch_installer(path: str | Path) -> None:  # pragma: no cover - Windows-only launch
     candidate = Path(path).resolve()
     temp_root = Path(tempfile.gettempdir()).resolve()
-    if candidate.parent != temp_root or not candidate.is_file() or not _INSTALLER_NAME.fullmatch(candidate.name):
+    if (
+        candidate.parent != temp_root
+        or not candidate.is_file()
+        or not _INSTALLER_NAME.fullmatch(candidate.name)
+    ):
         raise ValueError("refusing to launch an untrusted installer path")
-    args = [str(candidate)]
-    if silent:
-        args.extend(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
-    # The executable path is constrained to our updater-created temp asset and verified by SHA-256.
-    subprocess.Popen(args, close_fds=True, shell=False)  # nosec B603  # NOSONAR
+    if os.name != "nt" or not hasattr(os, "startfile"):
+        raise RuntimeError("the Windows installer can only be launched on Windows")
+    os.startfile(str(candidate))  # type: ignore[attr-defined]
