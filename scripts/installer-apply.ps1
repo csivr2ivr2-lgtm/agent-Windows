@@ -6,8 +6,11 @@ $ErrorActionPreference = 'Stop'
 $ServiceName = 'AgentWindowsAI'
 $ServiceRoot = Join-Path $env:ProgramData $ServiceName
 $DataRoot = Join-Path $ServiceRoot 'data'
-$RuntimeRoot = Join-Path $ServiceRoot 'python-runtime'
-$ToolsRoot = Join-Path $ServiceRoot 'tools'
+$RuntimeRoot = Join-Path $InstallRoot 'python-runtime'
+$ToolsRoot = Join-Path $InstallRoot 'tools'
+$LegacyRuntimeRoot = Join-Path $ServiceRoot 'python-runtime'
+$LegacyToolsRoot = Join-Path $ServiceRoot 'tools'
+$Python = Join-Path $RuntimeRoot 'python.exe'
 
 function Stop-AgentService {
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -17,7 +20,7 @@ function Stop-AgentService {
     }
 }
 
-function Set-ServiceRootAcl {
+function Set-StateRootAcl {
     param([string]$Path)
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
@@ -27,64 +30,62 @@ function Set-ServiceRootAcl {
     $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
     $propagation = [Security.AccessControl.PropagationFlags]::None
     $allow = [Security.AccessControl.AccessControlType]::Allow
-    $rights = [Security.AccessControl.FileSystemRights]::FullControl
-    foreach ($sid in @($systemSid, $adminsSid, $currentSid)) {
+    $full = [Security.AccessControl.FileSystemRights]::FullControl
+    $modify = [Security.AccessControl.FileSystemRights]::Modify
+    foreach ($sid in @($systemSid, $adminsSid)) {
         [void]$acl.AddAccessRule(
             [Security.AccessControl.FileSystemAccessRule]::new(
-                $sid, $rights, $inherit, $propagation, $allow
+                $sid, $full, $inherit, $propagation, $allow
             )
         )
     }
+    [void]$acl.AddAccessRule(
+        [Security.AccessControl.FileSystemAccessRule]::new(
+            $currentSid, $modify, $inherit, $propagation, $allow
+        )
+    )
     Set-Acl -Path $Path -AclObject $acl
+}
+
+if (-not (Test-Path $Python)) {
+    throw "Bundled Python runtime is missing: $Python"
+}
+if (-not (Test-Path (Join-Path $RuntimeRoot 'pythonservice.exe'))) {
+    throw "Bundled Windows service host is missing from $RuntimeRoot"
+}
+if (-not (Test-Path $ToolsRoot)) {
+    throw "Bundled media tools are missing: $ToolsRoot"
 }
 
 New-Item -ItemType Directory -Path $ServiceRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
-Set-ServiceRootAcl -Path $ServiceRoot
+Set-StateRootAcl -Path $ServiceRoot
 Stop-AgentService
-
-$BundledRuntime = Join-Path $InstallRoot 'python-runtime'
-if (-not (Test-Path (Join-Path $BundledRuntime 'python.exe'))) {
-    throw "Bundled Python runtime is missing: $BundledRuntime"
-}
-
-if (Test-Path $RuntimeRoot) {
-    Remove-Item -Path $RuntimeRoot -Recurse -Force
-}
-New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
-& robocopy.exe "$BundledRuntime" "$RuntimeRoot" /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
-if ($LASTEXITCODE -ge 8) {
-    throw "Installing bundled Python runtime failed (robocopy exit $LASTEXITCODE)."
-}
-
-$BundledTools = Join-Path $InstallRoot 'tools'
-if (Test-Path $BundledTools) {
-    if (Test-Path $ToolsRoot) { Remove-Item -Path $ToolsRoot -Recurse -Force }
-    New-Item -ItemType Directory -Path $ToolsRoot -Force | Out-Null
-    & robocopy.exe "$BundledTools" "$ToolsRoot" /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
-    if ($LASTEXITCODE -ge 8) {
-        throw "Installing bundled media tools failed (robocopy exit $LASTEXITCODE)."
-    }
-}
-
-$Python = Join-Path $RuntimeRoot 'python.exe'
-& "$Python" -m pip install --disable-pip-version-check --no-index --no-build-isolation --force-reinstall --no-deps "$InstallRoot"
-if ($LASTEXITCODE -ne 0) { throw 'Installing AI Aharon package failed.' }
 
 $ServiceEnv = Join-Path $ServiceRoot '.env'
 $ExampleEnv = Join-Path $InstallRoot '.env.example'
 if (-not (Test-Path $ServiceEnv)) {
     if (-not (Test-Path $ExampleEnv)) { throw '.env.example is missing from installer payload.' }
-    Copy-Item $ExampleEnv $ServiceEnv
+    Copy-Item -Path $ExampleEnv -Destination $ServiceEnv
 }
 
-# Preserve memory and settings across upgrades. Only stale service registration is replaced.
+# Replace only the service registration. Program files stay under the ACL-protected
+# install directory; ProgramData contains only mutable settings, logs and memory.
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($null -ne $existing) {
     & "$Python" -m agent_windows.windows_service remove | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        & sc.exe delete $ServiceName | Out-Null
+    }
     Start-Sleep -Milliseconds 800
 }
 
+# Remove binaries created by pre-0.2 installer attempts after the old service is stopped.
+Remove-Item -Path $LegacyRuntimeRoot -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Path $LegacyToolsRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+$env:AGENT_WINDOWS_HOME = $ServiceRoot
+$env:AGENT_WINDOWS_INSTALL_ROOT = $InstallRoot
 & "$Python" -m agent_windows.windows_service --startup auto install
 if ($LASTEXITCODE -ne 0) { throw 'Windows service installation failed.' }
 
@@ -105,4 +106,4 @@ if (-not (Test-Path $tokenPath)) {
 }
 
 & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/15000/""/0 | Out-Null
-Set-ServiceRootAcl -Path $ServiceRoot
+Set-StateRootAcl -Path $ServiceRoot
