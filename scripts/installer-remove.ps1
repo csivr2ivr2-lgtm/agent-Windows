@@ -5,9 +5,9 @@ param(
 $ErrorActionPreference = 'SilentlyContinue'
 $ServiceName = 'AgentWindowsAI'
 $ServiceRoot = Join-Path $env:ProgramData $ServiceName
-$RuntimeRoot = Join-Path $ServiceRoot 'python-runtime'
-$ToolsRoot = Join-Path $ServiceRoot 'tools'
-$RuntimePython = Join-Path $RuntimeRoot 'python.exe'
+$RuntimePython = Join-Path (Join-Path $InstallRoot 'python-runtime') 'python.exe'
+$LegacyRuntimeRoot = Join-Path $ServiceRoot 'python-runtime'
+$LegacyToolsRoot = Join-Path $ServiceRoot 'tools'
 
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($null -ne $svc) {
@@ -16,13 +16,15 @@ if ($null -ne $svc) {
         try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15)) } catch {}
     }
     if (Test-Path $RuntimePython) {
-        & $RuntimePython -m agent_windows.windows_service remove | Out-Null
+        $env:AGENT_WINDOWS_HOME = $ServiceRoot
+        $env:AGENT_WINDOWS_INSTALL_ROOT = $InstallRoot
+        & "$RuntimePython" -m agent_windows.windows_service remove | Out-Null
     } else {
         & sc.exe delete $ServiceName | Out-Null
     }
 }
 
-# Remove replaceable binaries, but intentionally keep .env and data/memory so a
-# reinstall can restore the user's configuration and long-term context.
-Remove-Item -Path $RuntimeRoot -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -Path $ToolsRoot -Recurse -Force -ErrorAction SilentlyContinue
+# Pre-0.2 attempts placed replaceable binaries in ProgramData. Remove only those
+# legacy directories. Keep .env and data/memory so reinstall preserves context.
+Remove-Item -Path $LegacyRuntimeRoot -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Path $LegacyToolsRoot -Recurse -Force -ErrorAction SilentlyContinue
