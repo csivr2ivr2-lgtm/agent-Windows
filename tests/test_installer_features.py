@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_windows.agent_loop import AgentLoop
+from agent_windows.contracts import Message
 from agent_windows.memory import SQLiteMemoryStore
 from agent_windows.settings_ui import read_env_file, update_env_file
 from agent_windows.updater import check_for_update, is_newer
@@ -55,6 +56,24 @@ class MemoryRankingTests(unittest.TestCase):
         self.assertTrue(AgentLoop._durable_user_memory("Remember that my project uses Windows"))
         self.assertFalse(AgentLoop._durable_user_memory("what time is it"))
 
+    def test_history_is_used_for_memory_query(self):
+        memory = mock.MagicMock()
+        memory.search.return_value = []
+        loop = AgentLoop(
+            mock.MagicMock(),
+            memory,
+            mock.MagicMock(),
+            system_prompt="system",
+        )
+        history = [
+            Message("user", "We were configuring the Windows installer"),
+            Message("assistant", "The updater is next"),
+        ]
+        loop._initial_messages("continue", history)
+        query = memory.search.call_args.args[0]
+        self.assertIn("Windows installer", query)
+        self.assertIn("continue", query)
+
 
 class SettingsFileTests(unittest.TestCase):
     def test_updates_preserve_unknown_values_and_comments(self):
@@ -67,7 +86,7 @@ class SettingsFileTests(unittest.TestCase):
             self.assertEqual(values["GROQ_API_KEY"], "new secret")
             self.assertEqual(values["GEMINI_API_KEY"], "gemini")
             self.assertIn("# keep me", path.read_text(encoding="utf-8"))
-            self.assertTrue(path.with_suffix(".env.bak").exists())
+            self.assertTrue(path.with_name(path.name + ".bak").exists())
 
 
 class UpdaterTests(unittest.TestCase):
@@ -80,7 +99,7 @@ class UpdaterTests(unittest.TestCase):
         payload = json.dumps(
             {
                 "version": "99.0.0",
-                "url": "https://example.invalid/AI-Aharon.exe",
+                "url": "https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/download/v99.0.0/AI-Aharon-Setup-99.0.0.exe",
                 "sha256": "a" * 64,
             }
         ).encode()
@@ -90,9 +109,13 @@ class UpdaterTests(unittest.TestCase):
         with mock.patch("agent_windows.updater.urllib.request.urlopen", return_value=response), mock.patch(
             "agent_windows.updater.current_version", return_value="1.0.0"
         ):
-            info = check_for_update("https://example.invalid/update.json")
+            info = check_for_update("https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/latest/download/update.json")
         self.assertIsNotNone(info)
         self.assertEqual(info.version, "99.0.0")
+
+    def test_update_rejects_non_official_feed(self):
+        with self.assertRaises(ValueError):
+            check_for_update("https://example.invalid/update.json")
 
 
 if __name__ == "__main__":
