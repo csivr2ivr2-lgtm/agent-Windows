@@ -145,7 +145,12 @@ def _run_service_command_line() -> int:
         return 2
     import win32serviceutil
 
-    win32serviceutil.HandleCommandLine(service_class)
+    # pywin32 persists this import path into the service registry. The test
+    # variant has a synthetic module name, so explicitly keep the stable public
+    # module path that pythonservice.exe can import when the SCM starts it.
+    win32serviceutil.HandleCommandLine(
+        service_class, serviceClassString=SERVICE_CLASS_STRING
+    )
     return 0
 
 
