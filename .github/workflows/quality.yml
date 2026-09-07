@@ -139,6 +139,9 @@ jobs:
             src/agent_windows/settings_ui.py \
             src/agent_windows/desktop_gui.py \
             src/agent_windows/windows_service.py || true
+          curl -fsS \
+            "https://api.codacy.com/api/v3/analysis/organizations/gh/csivr2ivr2-lgtm/repositories/agent-Windows/pull-requests/2/issues?limit=100" \
+            -o codacy.json || printf '{"data":[]}' > codacy.json
       - name: Post SAST diagnostic on PR
         shell: bash
         env:
@@ -179,6 +182,22 @@ jobs:
               lines.append(
                   f"- `{extra.get('severity', 'INFO')}` `{item.get('check_id')}` "
                   f"{item.get('path')}:{start.get('line')} — {extra.get('message', '').replace(chr(10), ' ')[:500]}"
+              )
+
+          try:
+              codacy = json.loads(Path("codacy.json").read_text())
+              added = [item for item in codacy.get("data", []) if item.get("deltaType") == "Added"]
+          except Exception as exc:
+              added = []
+              lines.append(f"Codacy public API error: {exc}")
+          lines.extend(["", f"**Codacy Added issues:** {len(added)}"])
+          for item in added[:80]:
+              issue = item.get("commitIssue", {}) or {}
+              pattern = issue.get("patternInfo", {}) or {}
+              lines.append(
+                  f"- `{pattern.get('level', '?')}` `{pattern.get('id', '?')}` "
+                  f"{issue.get('filePath', '?')}:{issue.get('lineNumber', '?')} — "
+                  f"{str(issue.get('message', '')).replace(chr(10), ' ')[:500]}"
               )
 
           Path("sast-comment.md").write_text("\n".join(lines)[:60000], encoding="utf-8")
