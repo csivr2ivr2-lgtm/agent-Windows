@@ -143,8 +143,9 @@ def _run_service_command_line() -> int:
     if service_class is None:
         print("Windows service class is unavailable.", file=sys.stderr)
         return 2
-    import win32serviceutil
-
+    # win32serviceutil is imported at module load on Windows. Reuse that
+    # module-level reference so the service class path and the test variant
+    # remain stable instead of importing it again under a different context.
     # pywin32 persists this import path into the service registry. The test
     # variant has a synthetic module name, so explicitly keep the stable public
     # module path that pythonservice.exe can import when the SCM starts it.
