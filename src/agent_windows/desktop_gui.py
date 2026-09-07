@@ -201,68 +201,97 @@ class AgentDesktopApp:
         if not self._closing.is_set():
             self._check_update(manual=False)
 
-    def _check_update(self, *, manual: bool) -> None:  # pragma: no cover - threaded Tk callback
+    def _show_update_error(self, title: str, message: str) -> None:  # pragma: no cover
         from tkinter import messagebox
-        from .updater import check_for_update, current_version, download_update, launch_installer
 
-        def worker() -> None:
-            try:
-                info = check_for_update()
-            except Exception as exc:
-                LOGGER.debug("Update check failed", exc_info=True)
-                if manual and not self._closing.is_set():
-                    self.root.after(
-                        0,
-                        lambda message=str(exc): messagebox.showerror(
-                            "בדיקת עדכון נכשלה", message, parent=self.root
-                        ),
-                    )
-                return
-            if self._closing.is_set():
-                return
-            if info is None:
-                if manual:
-                    self.root.after(
-                        0,
-                        lambda: messagebox.showinfo(
-                            "AI Aharon",
-                            f"מותקנת הגרסה העדכנית ({current_version()}).",
-                            parent=self.root,
-                        ),
-                    )
-                return
+        if not self._closing.is_set():
+            messagebox.showerror(title, message, parent=self.root)
 
-            def ask() -> None:
-                notes = f"\n\n{info.notes}" if info.notes else ""
-                accepted = info.mandatory or messagebox.askyesno(
-                    "עדכון זמין",
-                    f"גרסה {info.version} זמינה. להוריד ולהתקין עכשיו?{notes}",
-                    parent=self.root,
+    def _show_current_version(self) -> None:  # pragma: no cover
+        from tkinter import messagebox
+        from .updater import current_version
+
+        messagebox.showinfo(
+            "AI Aharon",
+            f"מותקנת הגרסה העדכנית ({current_version()}).",
+            parent=self.root,
+        )
+
+    def _update_check_worker(self, manual: bool) -> None:
+        from .updater import check_for_update
+
+        try:
+            info = check_for_update()
+        except Exception as exc:
+            LOGGER.debug("Update check failed", exc_info=True)
+            if manual and not self._closing.is_set():
+                self.root.after(
+                    0,
+                    lambda message=str(exc): self._show_update_error(
+                        "בדיקת עדכון נכשלה", message
+                    ),
                 )
-                if not accepted:
-                    return
+            return
+        if not self._closing.is_set():
+            self.root.after(0, lambda: self._handle_update_result(info, manual))
 
-                def download_worker() -> None:
-                    try:
-                        installer = download_update(info)
-                        self.root.after(0, lambda: launch_installer(installer))
-                        self.root.after(400, self.close)
-                    except Exception as exc:
-                        LOGGER.exception("Update download failed")
-                        self.root.after(
-                            0,
-                            lambda message=str(exc): messagebox.showerror(
-                                "העדכון נכשל", message, parent=self.root
-                            ),
-                        )
+    def _handle_update_result(self, info, manual: bool) -> None:  # pragma: no cover
+        if info is None:
+            if manual:
+                self._show_current_version()
+            return
+        self._offer_update(info)
 
-                threading.Thread(
-                    target=download_worker, daemon=True, name="AiAharonUpdateDownload"
-                ).start()
+    def _offer_update(self, info) -> None:  # pragma: no cover
+        from tkinter import messagebox
 
-            self.root.after(0, ask)
+        notes = f"\n\n{info.notes}" if info.notes else ""
+        accepted = info.mandatory or messagebox.askyesno(
+            "עדכון זמין",
+            f"גרסה {info.version} זמינה. להוריד ולהתקין עכשיו?{notes}",
+            parent=self.root,
+        )
+        if not accepted:
+            return
+        threading.Thread(
+            target=lambda: self._download_update_worker(info),
+            daemon=True,
+            name="AiAharonUpdateDownload",
+        ).start()
 
-        threading.Thread(target=worker, daemon=True, name="AiAharonUpdateCheck").start()
+    def _download_update_worker(self, info) -> None:
+        from .updater import download_update
+
+        try:
+            installer = download_update(info)
+        except Exception as exc:
+            LOGGER.exception("Update download failed")
+            if not self._closing.is_set():
+                self.root.after(
+                    0,
+                    lambda message=str(exc): self._show_update_error("העדכון נכשל", message),
+                )
+            return
+        if not self._closing.is_set():
+            self.root.after(0, lambda: self._launch_downloaded_update(installer))
+
+    def _launch_downloaded_update(self, installer) -> None:  # pragma: no cover
+        from .updater import launch_installer
+
+        try:
+            launch_installer(installer)
+        except Exception as exc:
+            LOGGER.exception("Update launch failed")
+            self._show_update_error("העדכון נכשל", str(exc))
+            return
+        self.root.after(400, self.close)
+
+    def _check_update(self, *, manual: bool) -> None:  # pragma: no cover - threaded Tk callback
+        threading.Thread(
+            target=lambda: self._update_check_worker(manual),
+            daemon=True,
+            name="AiAharonUpdateCheck",
+        ).start()
 
     def _set_status(self, value: str) -> None:
         if threading.current_thread() is not threading.main_thread():
