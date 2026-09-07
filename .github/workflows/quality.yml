@@ -186,17 +186,23 @@ jobs:
 
           try:
               codacy = json.loads(Path("codacy.json").read_text())
-              added = [item for item in codacy.get("data", []) if item.get("deltaType") == "Added"]
+              records = codacy.get("data", [])
+              active = [item for item in records if item.get("deltaType") not in {"Fixed", "Removed"}]
           except Exception as exc:
-              added = []
+              records = []
+              active = []
               lines.append(f"Codacy public API error: {exc}")
-          lines.extend(["", f"**Codacy Added issues:** {len(added)}"])
-          for item in added[:80]:
-              issue = item.get("commitIssue", {}) or {}
+          counts = {}
+          for item in records:
+              delta = str(item.get("deltaType", "Unknown"))
+              counts[delta] = counts.get(delta, 0) + 1
+          lines.extend(["", f"**Codacy delta types:** {counts}", f"**Codacy active/non-fixed:** {len(active)}"])
+          for item in active[:80]:
+              issue = item.get("commitIssue", {}) or item.get("fixedCommitIssue", {}) or {}
               pattern = issue.get("patternInfo", {}) or {}
               lines.append(
-                  f"- `{pattern.get('level', '?')}` `{pattern.get('id', '?')}` "
-                  f"{issue.get('filePath', '?')}:{issue.get('lineNumber', '?')} — "
+                  f"- `{item.get('deltaType', '?')}` `{pattern.get('level', '?')}` "
+                  f"`{pattern.get('id', '?')}` {issue.get('filePath', '?')}:{issue.get('lineNumber', '?')} — "
                   f"{str(issue.get('message', '')).replace(chr(10), ' ')[:500]}"
               )
 
