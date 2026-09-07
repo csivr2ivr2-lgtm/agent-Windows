@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   compile:
@@ -43,41 +42,8 @@ jobs:
           cache: pip
       - run: python -m pip install --disable-pip-version-check --requirement scripts/ci-requirements.txt
       - run: python -m pip install --disable-pip-version-check --no-deps -e .
-      - name: Run tests and coverage
-        id: coverage_run
-        shell: bash
-        run: |
-          set +e
-          coverage run -m unittest discover -s tests -v 2>&1 | tee test-output.txt
-          test_exit=${PIPESTATUS[0]}
-          coverage report 2>&1 | tee coverage-output.txt
-          coverage_exit=${PIPESTATUS[0]}
-          echo "test_exit=$test_exit" >> "$GITHUB_OUTPUT"
-          echo "coverage_exit=$coverage_exit" >> "$GITHUB_OUTPUT"
-          if [ "$test_exit" -ne 0 ] || [ "$coverage_exit" -ne 0 ]; then
-            exit 1
-          fi
-      - name: Report coverage/test failure on PR
-        if: failure() && github.event_name == 'pull_request'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          {
-            echo '### CI coverage diagnostic (temporary)'
-            echo
-            echo '#### Tests'
-            echo '```text'
-            tail -n 50 test-output.txt 2>/dev/null || true
-            echo '```'
-            echo
-            echo '#### Coverage'
-            echo '```text'
-            cat coverage-output.txt 2>/dev/null || true
-            echo '```'
-          } > coverage-comment.md
-          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file coverage-comment.md
+      - run: coverage run -m unittest discover -s tests -v
+      - run: coverage report
       - run: coverage xml -o cobertura.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
