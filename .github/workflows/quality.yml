@@ -66,6 +66,36 @@ jobs:
       - run: python -m pip install --disable-pip-version-check --requirement scripts/ci-requirements.txt
       - run: python -m pip install --disable-pip-version-check --no-deps -e .
       - run: python -m compileall -q src tests
+      - name: Validate installer PowerShell syntax
+        shell: pwsh
+        run: |
+          $allErrors = @()
+          foreach ($script in @("scripts/installer-apply.ps1", "scripts/installer-remove.ps1")) {
+            $tokens = $null
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script), [ref]$tokens, [ref]$parseErrors
+            )
+            if ($parseErrors.Count -gt 0) {
+              $allErrors += $parseErrors | ForEach-Object { "$script: $($_.Message)" }
+            }
+          }
+          if ($allErrors.Count -gt 0) { throw ($allErrors -join "`n") }
+      - name: Compile Windows launcher
+        shell: pwsh
+        run: |
+          $icon = "assets\ai-aharon.ico"
+          if (-not (Test-Path $icon)) {
+            $encoded = (Get-Content "assets\ai-aharon.ico.b64" -Raw).Trim()
+            [IO.File]::WriteAllBytes($icon, [Convert]::FromBase64String($encoded))
+          }
+          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $csc)) { throw "C# compiler not found: $csc" }
+          $output = Join-Path $env:RUNNER_TEMP "AI-Aharon-smoke.exe"
+          & $csc /nologo /target:winexe /platform:x64 /reference:System.Windows.Forms.dll /win32icon:$icon /out:$output installer\launcher.cs
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $output)) {
+            throw "Launcher compilation failed"
+          }
       - name: Run Windows tests
         shell: pwsh
         run: |
