@@ -178,14 +178,22 @@ jobs:
             exit 0
           }
           $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
-            Where-Object FullName -Match 'x64' | Sort-Object FullName -Descending | Select-Object -First 1
-          if ($null -eq $signtool) { throw "signtool.exe not found" }
-          $installer = "dist\AI-Aharon-Setup-$env:VERSION.exe"
-          & $signtool.FullName sign /fd SHA256 /td SHA256 /tr https://timestamp.digicert.com /f $pfx /p $env:PFX_PASSWORD $installer
-          if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed" }
-          Remove-Item $pfx -Force
+          $cert = $null
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+            $securePassword = ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force
+            $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
+            if ($null -eq $cert) { throw "Code-signing certificate import failed" }
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
+              Where-Object FullName -Match 'x64' | Sort-Object FullName -Descending | Select-Object -First 1
+            if ($null -eq $signtool) { throw "signtool.exe not found" }
+            $installer = "dist\AI-Aharon-Setup-$env:VERSION.exe"
+            & $signtool.FullName sign /fd SHA256 /td SHA256 /tr https://timestamp.digicert.com /sha1 $cert.Thumbprint $installer
+            if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed" }
+          } finally {
+            if ($null -ne $cert) { Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force -ErrorAction SilentlyContinue }
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Generate update metadata
         shell: pwsh
