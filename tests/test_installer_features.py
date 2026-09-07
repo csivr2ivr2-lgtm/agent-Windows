@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from agent_windows.agent_loop import AgentLoop
@@ -221,14 +222,10 @@ class UpdaterTests(unittest.TestCase):
             installer = staging / "AI-Aharon-Setup-9.8.5.exe"
             installer.write_bytes(content)
             startfile = mock.Mock()
+            fake_os = SimpleNamespace(name="nt", startfile=startfile)
             with mock.patch(
                 "agent_windows.updater.tempfile.gettempdir", return_value=directory
-            ), mock.patch("agent_windows.updater.os.name", "nt"), mock.patch.object(
-                __import__("agent_windows.updater", fromlist=["os"]).os,
-                "startfile",
-                startfile,
-                create=True,
-            ):
+            ), mock.patch("agent_windows.updater.os", fake_os):
                 launch_installer(installer)
             startfile.assert_called_once_with(str(installer.resolve()))
 
