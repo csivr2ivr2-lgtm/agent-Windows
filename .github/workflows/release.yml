@@ -24,12 +24,14 @@ jobs:
     outputs:
       version: ${{ steps.release_version.outputs.version }}
       tag_name: ${{ steps.release_version.outputs.tag_name }}
+      diagnostics: ${{ steps.collect_status.outputs.diagnostics }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Python
+        id: setup_python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
@@ -60,6 +62,7 @@ jobs:
           "tag_name=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Validate Python source
+        id: validate
         shell: pwsh
         run: |
           python -m compileall -q src tests
@@ -67,6 +70,7 @@ jobs:
           python -m unittest discover -s tests -p "test*.py"
 
       - name: Prepare release payload and icon
+        id: prepare_payload
         shell: pwsh
         run: |
           Remove-Item release-payload, dist -Recurse -Force -ErrorAction SilentlyContinue
@@ -81,6 +85,7 @@ jobs:
           }
 
       - name: Bundle private Python runtime
+        id: bundle_runtime
         shell: pwsh
         run: |
           $basePython = (python -c "import sys; print(sys.base_prefix)").Trim()
@@ -100,6 +105,7 @@ jobs:
           }
 
       - name: Bundle pinned FFmpeg and FFplay
+        id: bundle_ffmpeg
         shell: pwsh
         run: |
           $releaseTag = "autobuild-2026-09-05-13-10"
@@ -137,6 +143,7 @@ jobs:
           }
 
       - name: Build desktop launcher
+        id: build_launcher
         shell: pwsh
         run: |
           $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
@@ -145,6 +152,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Launcher compilation failed" }
 
       - name: Install Inno Setup if needed
+        id: install_inno
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
@@ -153,6 +161,7 @@ jobs:
           }
 
       - name: Build installer
+        id: build_installer
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
@@ -160,6 +169,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
 
       - name: Optionally sign installer
+        id: sign_installer
         shell: pwsh
         env:
           PFX_B64: ${{ secrets.WINDOWS_CERT_PFX_B64 }}
@@ -188,6 +198,7 @@ jobs:
           }
 
       - name: Generate update metadata
+        id: generate_metadata
         shell: pwsh
         run: |
           $name = "AI-Aharon-Setup-$env:VERSION.exe"
@@ -212,6 +223,7 @@ jobs:
           ) | Set-Content "dist\checksums.sha256" -Encoding ascii
 
       - name: Upload build artifact
+        id: upload_artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: AI-Aharon-Windows-${{ env.VERSION }}
@@ -221,6 +233,44 @@ jobs:
             dist/update.json
             dist/checksums.sha256
           if-no-files-found: error
+
+      - name: Collect release step outcomes
+        id: collect_status
+        if: always()
+        shell: pwsh
+        run: |
+          $diagnostics = @(
+            "setup_python=${{ steps.setup_python.outcome }}",
+            "release_version=${{ steps.release_version.outcome }}",
+            "validate=${{ steps.validate.outcome }}",
+            "prepare_payload=${{ steps.prepare_payload.outcome }}",
+            "bundle_runtime=${{ steps.bundle_runtime.outcome }}",
+            "bundle_ffmpeg=${{ steps.bundle_ffmpeg.outcome }}",
+            "build_launcher=${{ steps.build_launcher.outcome }}",
+            "install_inno=${{ steps.install_inno.outcome }}",
+            "build_installer=${{ steps.build_installer.outcome }}",
+            "sign_installer=${{ steps.sign_installer.outcome }}",
+            "generate_metadata=${{ steps.generate_metadata.outcome }}",
+            "upload_artifact=${{ steps.upload_artifact.outcome }}"
+          ) -join "; "
+          "diagnostics=$diagnostics" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+  report-release-failure:
+    needs: build-windows-installer
+    if: >-
+      needs.build-windows-installer.result == 'failure' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DIAGNOSTICS: ${{ needs.build-windows-installer.outputs.diagnostics }}
+    steps:
+      - name: Report temporary release diagnostic
+        run: |
+          gh pr comment 3 --repo "$GITHUB_REPOSITORY" --body "Windows Release diagnostic for commit \`$GITHUB_SHA\`: \`$DIAGNOSTICS\`"
 
   publish-release:
     needs: build-windows-installer
