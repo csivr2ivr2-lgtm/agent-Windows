@@ -151,7 +151,7 @@ jobs:
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $iscc "/DMyAppVersion=`\"$env:VERSION`\"" "installer\AI-Aharon.iss"
+          & $iscc "--define=MyAppVersion=$env:VERSION" "installer\AI-Aharon.iss"
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
 
       - name: Optionally sign installer
