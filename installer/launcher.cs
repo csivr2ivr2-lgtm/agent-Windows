@@ -1,18 +1,10 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Text;
 using System.Windows.Forms;
 
 internal static class Program
 {
-    private static string Quote(string value)
-    {
-        if (String.IsNullOrEmpty(value)) return "\"\"";
-        if (value.IndexOfAny(new[] { ' ', '\t', '"' }) < 0) return value;
-        return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
-    }
-
     [STAThread]
     private static int Main(string[] args)
     {
@@ -36,21 +28,14 @@ internal static class Program
             return 2;
         }
 
-        var command = new StringBuilder();
-        command.Append("-m agent_windows.desktop_gui --env ");
-        command.Append(Quote(envFile));
         bool minimized = Array.Exists(
             args,
             arg => String.Equals(arg, "--minimized", StringComparison.Ordinal)
         );
-        if (minimized)
-        {
-            command.Append(" --minimized");
-        }
 
         var start = new ProcessStartInfo();
         start.FileName = python;
-        start.Arguments = command.ToString();
+        start.Arguments = minimized ? "-m agent_windows.desktop_gui --minimized" : "-m agent_windows.desktop_gui";
         start.WorkingDirectory = stateRoot;
         start.UseShellExecute = false;
         start.CreateNoWindow = true;

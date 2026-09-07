@@ -65,8 +65,12 @@ def _env_value(value: str) -> str:
 
 
 def update_env_file(path: str | Path, updates: dict[str, str]) -> None:
-    """Atomically update known keys without removing comments or unknown settings."""
-    file = Path(path)
+    """Atomically update a real .env file without following a file-level symlink."""
+    file = Path(path).expanduser()
+    if file.name != ".env":
+        raise ValueError("settings may only be written to a .env file")
+    if file.is_symlink():
+        raise ValueError("refusing to write settings through a symbolic link")
     file.parent.mkdir(parents=True, exist_ok=True)
     original = file.read_text(encoding="utf-8") if file.exists() else ""
     lines = original.splitlines()

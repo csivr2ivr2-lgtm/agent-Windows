@@ -120,6 +120,27 @@ class SettingsFileTests(unittest.TestCase):
             self.assertIn("# keep me", path.read_text(encoding="utf-8"))
             self.assertTrue(path.with_name(path.name + ".bak").exists())
 
+    def test_rejects_non_env_settings_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "not-env.txt"
+            with self.assertRaises(ValueError):
+                update_env_file(path, {"GROQ_API_KEY": "secret"})
+            self.assertFalse(path.exists())
+
+    def test_rejects_symlink_settings_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "real.env"
+            target.write_text("SAFE=1\n", encoding="utf-8")
+            link = root / ".env"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symbolic links are not available")
+            with self.assertRaises(ValueError):
+                update_env_file(link, {"GROQ_API_KEY": "secret"})
+            self.assertEqual(target.read_text(encoding="utf-8"), "SAFE=1\n")
+
 
 class UpdaterTests(unittest.TestCase):
     def test_version_comparison(self):
@@ -241,6 +262,9 @@ class DistributionHardeningTests(unittest.TestCase):
         self.assertIn('start.EnvironmentVariables["PATH"] = tools + ";"', source)
         self.assertIn("start.UseShellExecute = false", source)
         self.assertIn("AppDomain.CurrentDomain.BaseDirectory", source)
+        self.assertNotIn("StringBuilder", source)
+        self.assertNotIn("command.Append", source)
+        self.assertIn('start.Arguments = minimized ? "-m agent_windows.desktop_gui --minimized"', source)
         self.assertIn('Path.Combine(installRoot, "python-runtime", "pythonw.exe")', source)
         self.assertIn('Path.Combine(stateRoot, ".env")', source)
 
