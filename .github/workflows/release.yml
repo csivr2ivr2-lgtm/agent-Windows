@@ -110,29 +110,15 @@ jobs:
         run: |
           $releaseTag = "autobuild-2026-09-05-13-10"
           $assetName = "ffmpeg-n9.0.1-26-g5c8e7e2433-win64-gpl-9.0.zip"
-          $manifestExpected = "93217349028cdf544da36fcff5081407b90b9a7d70d35805967291aaff5a7604"
+          $assetExpected = "a8ebbaf7a99185f5abc3a2d3a657521c38d7966f06b70468d7ab29a67fe8654f"
           $baseUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$releaseTag"
-          $manifest = Join-Path $env:RUNNER_TEMP "ffmpeg-checksums.sha256"
           $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
           $expanded = Join-Path $env:RUNNER_TEMP "ffmpeg"
 
-          Invoke-WebRequest "$baseUrl/checksums.sha256" -OutFile $manifest
-          $manifestActual = (Get-FileHash $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($manifestActual -ne $manifestExpected) {
-            throw "FFmpeg checksum manifest verification failed."
-          }
-          $line = Get-Content $manifest | Where-Object { $_ -match [regex]::Escape($assetName) } | Select-Object -First 1
-          if (-not $line -or $line -notmatch '^([0-9a-fA-F]{64})\s+\*?(.+)$') {
-            throw "Pinned FFmpeg asset is missing from checksum manifest."
-          }
-          $assetExpected = $Matches[1].ToLowerInvariant()
-          if ($Matches[2].Trim() -ne $assetName) {
-            throw "FFmpeg checksum manifest asset name mismatch."
-          }
           Invoke-WebRequest "$baseUrl/$assetName" -OutFile $zip
           $assetActual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($assetActual -ne $assetExpected) {
-            throw "FFmpeg archive verification failed."
+            throw "Pinned FFmpeg archive verification failed."
           }
 
           Expand-Archive $zip $expanded -Force
