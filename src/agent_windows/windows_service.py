@@ -59,8 +59,8 @@ if sys.platform.startswith("win"):
             _svc_name_ = SERVICE_NAME
             _svc_display_name_ = "Agent Windows AI"
             _svc_description_ = (
-                "Background AI runtime for Agent Windows. "
-                "Audio stays in the logged-in user session."
+                "Low-privilege background AI runtime for Agent Windows. "
+                "Audio and interactive computer use stay in the logged-in user session."
             )
 
             def __init__(self, args):
@@ -134,28 +134,18 @@ def _format_current_exception() -> str:
 
 def _run_service_command_line() -> int:
     if not sys.platform.startswith("win"):
-        print("Windows service support is only available on Windows.", file=sys.stderr)
+        print("Windows service mode is only available on Windows.", file=sys.stderr)
         return 2
     if _PYWIN32_IMPORT_ERROR is not None:
-        print(
-            "pywin32 is required. Run: .\\.venv\\Scripts\\python.exe -m pip install -e .",
-            file=sys.stderr,
-        )
+        print(f"pywin32 is required: {_PYWIN32_IMPORT_ERROR}", file=sys.stderr)
         return 2
-
     service_class = globals().get("AgentWindowsService")
     if service_class is None:
         print("Windows service class is unavailable.", file=sys.stderr)
         return 2
+    import win32serviceutil
 
-    # When this module is launched with ``python -m``, pywin32 otherwise
-    # derives the service class from ``__main__`` / argv[0] and stores a file
-    # path-like value in HKLM\...\PythonClass. pythonservice.exe cannot import
-    # that value when SCM starts the service, which surfaces as error 1053.
-    # Register the stable import path explicitly.
-    win32serviceutil.HandleCommandLine(
-        service_class, serviceClassString=SERVICE_CLASS_STRING
-    )
+    win32serviceutil.HandleCommandLine(service_class)
     return 0
 
 

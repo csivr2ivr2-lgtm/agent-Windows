@@ -275,6 +275,9 @@ class DistributionHardeningTests(unittest.TestCase):
         self.assertIn("$ToolsRoot = Join-Path $InstallRoot 'tools'", source)
         self.assertIn("$LegacyRuntimeRoot = Join-Path $ServiceRoot 'python-runtime'", source)
         self.assertIn("[Security.AccessControl.FileSystemRights]::Modify", source)
+        self.assertIn("S-1-5-19", source)
+        self.assertIn('obj= "NT AUTHORITY\\LocalService"', source)
+        self.assertNotIn('obj= "LocalSystem"', source)
         self.assertNotIn("robocopy.exe", source)
         self.assertNotIn("pip install", source)
 

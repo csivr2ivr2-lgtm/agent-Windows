@@ -18,8 +18,8 @@ MAX_REQUEST_BYTES = 64 * 1024
 def _service_data_dir(data_dir: Path) -> Path:
     """Resolve the machine service data directory for user-session clients.
 
-    The Windows service is installed under ProgramData so LocalSystem does not
-    need access to the signed-in user's profile. Session clients still pass
+    The Windows service keeps mutable state under ProgramData and runs as the
+    built-in low-privilege LocalService account. Session clients still pass
     their normal Settings.data_dir; when the machine service token exists we
     transparently use the ProgramData token instead.
     """

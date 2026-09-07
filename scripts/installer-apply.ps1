@@ -25,6 +25,7 @@ function Set-StateRootAcl {
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $adminsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $localServiceSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-19')
     $acl = [Security.AccessControl.DirectorySecurity]::new()
     $acl.SetAccessRuleProtection($true, $false)
     $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
@@ -39,11 +40,13 @@ function Set-StateRootAcl {
             )
         )
     }
-    [void]$acl.AddAccessRule(
-        [Security.AccessControl.FileSystemAccessRule]::new(
-            $currentSid, $modify, $inherit, $propagation, $allow
+    foreach ($sid in @($currentSid, $localServiceSid)) {
+        [void]$acl.AddAccessRule(
+            [Security.AccessControl.FileSystemAccessRule]::new(
+                $sid, $modify, $inherit, $propagation, $allow
+            )
         )
-    )
+    }
     Set-Acl -Path $Path -AclObject $acl
 }
 
@@ -88,6 +91,12 @@ $env:AGENT_WINDOWS_HOME = $ServiceRoot
 $env:AGENT_WINDOWS_INSTALL_ROOT = $InstallRoot
 & "$Python" -m agent_windows.windows_service --startup auto install
 if ($LASTEXITCODE -ne 0) { throw 'Windows service installation failed.' }
+
+# Never expose the authenticated local chat API through an administrative service
+# account. LocalService can access the explicit ProgramData state ACL but cannot
+# turn a normal desktop user into LocalSystem through agent tool execution.
+& sc.exe config $ServiceName obj= "NT AUTHORITY\LocalService" password= "" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Failed to configure AgentWindowsAI as LocalService.' }
 
 Start-Service -Name $ServiceName
 $service = Get-Service -Name $ServiceName
