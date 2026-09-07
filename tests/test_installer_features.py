@@ -61,8 +61,8 @@ class MemoryRankingTests(unittest.TestCase):
                     row[1]
                     for row in store._database().execute("PRAGMA table_info(memories)")
                 }
-                self.assertTrue(
-                    {"kind", "importance", "last_accessed", "access_count"} <= columns
+                self.assertLessEqual(
+                    {"kind", "importance", "last_accessed", "access_count"}, columns
                 )
                 self.assertEqual(list(store.search("hello world")), ["hello world"])
             finally:
@@ -118,7 +118,8 @@ class SettingsFileTests(unittest.TestCase):
             self.assertEqual(values["GROQ_API_KEY"], "new secret")
             self.assertEqual(values["GEMINI_API_KEY"], "gemini")
             self.assertIn("# keep me", path.read_text(encoding="utf-8"))
-            self.assertTrue(path.with_name(path.name + ".bak").exists())
+            self.assertFalse(path.with_name(path.name + ".bak").exists())
+            self.assertFalse(any(Path(directory).glob(".ai-aharon-env-*.tmp")))
 
     def test_rejects_non_env_settings_target(self):
         with tempfile.TemporaryDirectory() as directory:

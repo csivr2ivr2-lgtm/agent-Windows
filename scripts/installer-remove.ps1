@@ -13,7 +13,7 @@ $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($null -ne $svc) {
     if ($svc.Status -ne 'Stopped') {
         Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-        try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15)) } catch {}
+        try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15)) } catch { Write-Verbose "Timed out waiting for service stop during uninstall: $($_.Exception.Message)" }
     }
     if (Test-Path $RuntimePython) {
         $env:AGENT_WINDOWS_HOME = $ServiceRoot

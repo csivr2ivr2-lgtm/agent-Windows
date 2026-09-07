@@ -18,10 +18,10 @@ DEFAULT_UPDATE_URL = f"https://github.com/{_REPOSITORY}/releases/latest/download
 DEFAULT_INSTALLER_URL = (
     f"https://github.com/{_REPOSITORY}/releases/latest/download/AI-Aharon-Setup.exe"
 )
-_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?$")
+_VERSION = re.compile(r"^\d+\.\d+\.\d+(?:[.-][\dA-Za-z.-]+)?$")
 _STAGING_DIR = re.compile(r"^AI-Aharon-Update-([0-9a-f]{64})-.+$")
 _INSTALLER_NAME = re.compile(
-    r"^AI-Aharon-Setup-[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?\.exe$"
+    r"^AI-Aharon-Setup-\d+\.\d+\.\d+(?:[.-][\dA-Za-z.-]+)?\.exe$"
 )
 _GITHUB_DOWNLOAD_HOSTS = frozenset(
     {

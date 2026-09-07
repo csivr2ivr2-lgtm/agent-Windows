@@ -16,7 +16,7 @@ function Stop-AgentService {
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($null -ne $svc -and $svc.Status -ne 'Stopped') {
         Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-        try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) } catch {}
+        try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) } catch { Write-Verbose "Timed out waiting for service stop during install: $($_.Exception.Message)" }
     }
 }
 

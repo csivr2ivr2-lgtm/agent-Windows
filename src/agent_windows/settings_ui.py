@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -64,20 +65,10 @@ def _env_value(value: str) -> str:
     return clean
 
 
-def update_env_file(path: str | Path, updates: dict[str, str]) -> None:
-    """Atomically update a real .env file without following a file-level symlink."""
-    file = Path(path).expanduser()
-    if file.name != ".env":
-        raise ValueError("settings may only be written to a .env file")
-    if file.is_symlink():
-        raise ValueError("refusing to write settings through a symbolic link")
-    file.parent.mkdir(parents=True, exist_ok=True)
-    original = file.read_text(encoding="utf-8") if file.exists() else ""
-    lines = original.splitlines()
+def _render_env(original: str, updates: dict[str, str]) -> str:
     remaining = dict(updates)
     output: list[str] = []
-
-    for raw in lines:
+    for raw in original.splitlines():
         stripped = raw.strip()
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.split("=", 1)[0].strip()
@@ -91,14 +82,86 @@ def update_env_file(path: str | Path, updates: dict[str, str]) -> None:
             output.append("")
         output.append("# Saved by AI Aharon settings")
         output.extend(f"{key}={_env_value(value)}" for key, value in remaining.items())
+    return "\n".join(output).rstrip() + "\n"
 
-    text = "\n".join(output).rstrip() + "\n"
-    temporary = file.with_suffix(file.suffix + ".tmp")
-    backup = file.with_suffix(file.suffix + ".bak")
-    temporary.write_text(text, encoding="utf-8")
-    if file.exists():
-        backup.write_text(original, encoding="utf-8")
-    os.replace(temporary, file)
+
+def _atomic_replace_text(file: Path, text: str) -> None:
+    """Write through a random same-directory file, then atomically replace .env."""
+    temp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=".ai-aharon-env-",
+            suffix=".tmp",
+            dir=file.parent,
+            delete=False,
+        ) as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+            temp_name = stream.name
+        os.replace(temp_name, file)
+        temp_name = None
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def update_env_file(path: str | Path, updates: dict[str, str]) -> None:
+    """Atomically update a real .env file without following a file-level symlink."""
+    file = Path(path).expanduser()
+    if file.name != ".env":
+        raise ValueError("settings may only be written to a .env file")
+    if file.is_symlink():
+        raise ValueError("refusing to write settings through a symbolic link")
+    file.parent.mkdir(parents=True, exist_ok=True)
+    original = file.read_text(encoding="utf-8") if file.exists() else ""
+    _atomic_replace_text(file, _render_env(original, updates))
+
+
+def _add_section(ttk, tk, body, values, entries, secret_entries, title, fields, *, secret=False):
+    ttk.Label(body, text=title, font=("Segoe UI", 11, "bold")).pack(
+        anchor="e", fill="x", pady=(12, 5)
+    )
+    for key, label in fields:
+        row = ttk.Frame(body)
+        row.pack(fill="x", pady=4)
+        ttk.Label(row, text=label, width=22, anchor="e").pack(side="right", padx=(8, 0))
+        variable = tk.StringVar(value=values.get(key, ""))
+        entry = ttk.Entry(row, textvariable=variable, show="•" if secret else "")
+        entry.pack(side="right", fill="x", expand=True)
+        entries[key] = variable
+        if secret:
+            secret_entries.append(entry)
+
+
+def _save_settings(window, env_path, entries, on_saved, messagebox) -> None:
+    updates = {key: variable.get().strip() for key, variable in entries.items()}
+    try:
+        update_env_file(env_path, updates)
+    except PermissionError:
+        messagebox.showerror(
+            "אין הרשאה",
+            "Windows לא אפשר לכתוב את קובץ ההגדרות. הפעל את AI Aharon כמנהל מערכת ושמור שוב.",
+            parent=window,
+        )
+        return
+    except (OSError, ValueError) as exc:
+        messagebox.showerror("שמירה נכשלה", str(exc), parent=window)
+        return
+    messagebox.showinfo(
+        "נשמר",
+        "ההגדרות נשמרו. הפעל מחדש את AI Aharon כדי שכל הספקים והשירות ייטענו עם הערכים החדשים.",
+        parent=window,
+    )
+    if on_saved:
+        on_saved()
+    window.destroy()
 
 
 def show_settings_window(  # pragma: no cover - interactive Tk window
@@ -140,24 +203,8 @@ def show_settings_window(  # pragma: no cover - interactive Tk window
 
     entries: dict[str, tk.StringVar] = {}
     secret_entries = []
-
-    def add_section(title: str, fields, *, secret: bool = False) -> None:
-        ttk.Label(body, text=title, font=("Segoe UI", 11, "bold")).pack(
-            anchor="e", fill="x", pady=(12, 5)
-        )
-        for key, label in fields:
-            row = ttk.Frame(body)
-            row.pack(fill="x", pady=4)
-            ttk.Label(row, text=label, width=22, anchor="e").pack(side="right", padx=(8, 0))
-            variable = tk.StringVar(value=values.get(key, ""))
-            entry = ttk.Entry(row, textvariable=variable, show="•" if secret else "")
-            entry.pack(side="right", fill="x", expand=True)
-            entries[key] = variable
-            if secret:
-                secret_entries.append(entry)
-
-    add_section("מפתחות API", SECRET_FIELDS, secret=True)
-    add_section("מודלים וניתוב", TEXT_FIELDS)
+    _add_section(ttk, tk, body, values, entries, secret_entries, "מפתחות API", SECRET_FIELDS, secret=True)
+    _add_section(ttk, tk, body, values, entries, secret_entries, "מודלים וניתוב", TEXT_FIELDS)
 
     show_secrets = tk.BooleanVar(value=False)
 
@@ -170,31 +217,12 @@ def show_settings_window(  # pragma: no cover - interactive Tk window
         body, text="הצג מפתחות", variable=show_secrets, command=toggle_secrets
     ).pack(anchor="e", pady=(10, 4))
 
-    def save() -> None:
-        updates = {key: variable.get().strip() for key, variable in entries.items()}
-        try:
-            update_env_file(env_path, updates)
-        except PermissionError:
-            messagebox.showerror(
-                "אין הרשאה",
-                "Windows לא אפשר לכתוב את קובץ ההגדרות. הפעל את AI Aharon כמנהל מערכת ושמור שוב.",
-                parent=window,
-            )
-            return
-        except OSError as exc:
-            messagebox.showerror("שמירה נכשלה", str(exc), parent=window)
-            return
-        messagebox.showinfo(
-            "נשמר",
-            "ההגדרות נשמרו. הפעל מחדש את AI Aharon כדי שכל הספקים והשירות ייטענו עם הערכים החדשים.",
-            parent=window,
-        )
-        if on_saved:
-            on_saved()
-        window.destroy()
-
     buttons = ttk.Frame(window, padding=(16, 8, 16, 16))
     buttons.pack(fill="x")
     ttk.Button(buttons, text="ביטול", command=window.destroy).pack(side="left")
-    ttk.Button(buttons, text="שמור", command=save).pack(side="right")
+    ttk.Button(
+        buttons,
+        text="שמור",
+        command=lambda: _save_settings(window, env_path, entries, on_saved, messagebox),
+    ).pack(side="right")
     window.grab_set()
