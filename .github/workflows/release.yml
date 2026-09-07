@@ -258,6 +258,7 @@ jobs:
   report-release-failure:
     needs: build-windows-installer
     if: >-
+      always() &&
       needs.build-windows-installer.result == 'failure' &&
       github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
