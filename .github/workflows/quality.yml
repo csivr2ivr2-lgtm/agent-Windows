@@ -142,6 +142,9 @@ jobs:
           curl -fsS \
             "https://api.codacy.com/api/v3/analysis/organizations/gh/csivr2ivr2-lgtm/repositories/agent-Windows/pull-requests/2/issues?limit=100" \
             -o codacy.json || printf '{"data":[]}' > codacy.json
+          curl -sS -o sonar.json -w "%{http_code}" \
+            "https://sonarcloud.io/api/issues/search?componentKeys=csivr2ivr2-lgtm_agent-Windows&pullRequest=2&issueStatuses=OPEN%2CCONFIRMED&ps=100" \
+            > sonar.status || true
       - name: Post SAST diagnostic on PR
         shell: bash
         env:
@@ -204,6 +207,25 @@ jobs:
                   f"- `{item.get('deltaType', '?')}` `{pattern.get('level', '?')}` "
                   f"`{pattern.get('id', '?')}` {issue.get('filePath', '?')}:{issue.get('lineNumber', '?')} — "
                   f"{str(issue.get('message', '')).replace(chr(10), ' ')[:500]}"
+              )
+
+          sonar_status = Path("sonar.status").read_text().strip() if Path("sonar.status").exists() else "?"
+          lines.extend(["", f"**Sonar public API HTTP:** {sonar_status}"])
+          try:
+              sonar = json.loads(Path("sonar.json").read_text())
+              sonar_issues = sonar.get("issues", []) if isinstance(sonar, dict) else []
+          except Exception as exc:
+              sonar_issues = []
+              lines.append(f"Sonar response parse error: {exc}")
+          lines.append(f"**Sonar open issues returned:** {len(sonar_issues)}")
+          for item in sonar_issues[:80]:
+              component = str(item.get("component", "?"))
+              if ":" in component:
+                  component = component.split(":", 1)[1]
+              lines.append(
+                  f"- `{item.get('severity', '?')}` `{item.get('rule', '?')}` "
+                  f"{component}:{item.get('line', '?')} — "
+                  f"{str(item.get('message', '')).replace(chr(10), ' ')[:500]}"
               )
 
           Path("sast-comment.md").write_text("\n".join(lines)[:60000], encoding="utf-8")
