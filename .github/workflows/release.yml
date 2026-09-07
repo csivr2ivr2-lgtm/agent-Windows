@@ -1,0 +1,243 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release_version.outputs.version }}
+      tag_name: ${{ steps.release_version.outputs.tag_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Resolve trusted release version
+        id: release_version
+        shell: pwsh
+        run: |
+          $version = (python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])").Trim()
+          if (-not [regex]::IsMatch($version, '\A[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?\z')) {
+            throw "Invalid project version in pyproject.toml"
+          }
+          $tag = "v$version"
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne $tag) {
+            throw "Release tag must match pyproject.toml version."
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TAG_NAME=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag_name=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Validate Python source
+        shell: pwsh
+        run: |
+          python -m compileall -q src tests
+          python -m pip install --disable-pip-version-check -e .
+          python -m unittest discover -s tests -p "test*.py"
+
+      - name: Prepare release payload and icon
+        shell: pwsh
+        run: |
+          Remove-Item release-payload, dist -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory release-payload | Out-Null
+          foreach ($item in @("src", "scripts", "assets", ".env.example", "pyproject.toml", "README.md")) {
+            Copy-Item $item release-payload -Recurse -Force
+          }
+          $icon = "assets\ai-aharon.ico"
+          if (-not (Test-Path $icon)) {
+            $encoded = (Get-Content "assets\ai-aharon.ico.b64" -Raw).Trim()
+            [IO.File]::WriteAllBytes($icon, [Convert]::FromBase64String($encoded))
+          }
+
+      - name: Bundle private Python runtime
+        shell: pwsh
+        run: |
+          $basePython = (python -c "import sys; print(sys.base_prefix)").Trim()
+          $runtime = "release-payload\python-runtime"
+          New-Item -ItemType Directory $runtime | Out-Null
+          & robocopy.exe $basePython $runtime /E /R:2 /W:1 /XD __pycache__ /XF *.pyc
+          if ($LASTEXITCODE -ge 8) { throw "Copying Python runtime failed: $LASTEXITCODE" }
+          & "$runtime\python.exe" -m pip install --disable-pip-version-check ".[realtime]"
+          if ($LASTEXITCODE -ne 0) { throw "Installing bundled dependencies failed" }
+
+          $serviceExe = Get-ChildItem "$runtime\Lib\site-packages" -Filter pythonservice.exe -Recurse | Select-Object -First 1
+          if ($null -eq $serviceExe) { throw "pythonservice.exe was not installed by pywin32" }
+          Copy-Item $serviceExe.FullName "$runtime\pythonservice.exe" -Force
+          $system32 = "$runtime\Lib\site-packages\pywin32_system32"
+          if (Test-Path $system32) {
+            Copy-Item "$system32\*.dll" $runtime -Force
+          }
+
+      - name: Bundle pinned FFmpeg and FFplay
+        shell: pwsh
+        run: |
+          $releaseTag = "autobuild-2026-09-05-13-10"
+          $assetName = "ffmpeg-n9.0.1-26-g5c8e7e2433-win64-gpl-9.0.zip"
+          $manifestExpected = "93217349028cdf544da36fcff5081407b90b9a7d70d35805967291aaff5a7604"
+          $baseUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$releaseTag"
+          $manifest = Join-Path $env:RUNNER_TEMP "ffmpeg-checksums.sha256"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          $expanded = Join-Path $env:RUNNER_TEMP "ffmpeg"
+
+          Invoke-WebRequest "$baseUrl/checksums.sha256" -OutFile $manifest
+          $manifestActual = (Get-FileHash $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifestActual -ne $manifestExpected) {
+            throw "FFmpeg checksum manifest verification failed."
+          }
+          $line = Get-Content $manifest | Where-Object { $_ -match [regex]::Escape($assetName) } | Select-Object -First 1
+          if (-not $line -or $line -notmatch '^([0-9a-fA-F]{64})\s+\*?(.+)$') {
+            throw "Pinned FFmpeg asset is missing from checksum manifest."
+          }
+          $assetExpected = $Matches[1].ToLowerInvariant()
+          if ($Matches[2].Trim() -ne $assetName) {
+            throw "FFmpeg checksum manifest asset name mismatch."
+          }
+          Invoke-WebRequest "$baseUrl/$assetName" -OutFile $zip
+          $assetActual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($assetActual -ne $assetExpected) {
+            throw "FFmpeg archive verification failed."
+          }
+
+          Expand-Archive $zip $expanded -Force
+          $bin = Get-ChildItem $expanded -Directory | Select-Object -First 1 | ForEach-Object { Join-Path $_.FullName "bin" }
+          New-Item -ItemType Directory "release-payload\tools" | Out-Null
+          foreach ($name in @("ffmpeg.exe", "ffplay.exe", "ffprobe.exe")) {
+            Copy-Item (Join-Path $bin $name) "release-payload\tools\$name" -Force
+          }
+
+      - name: Build desktop launcher
+        shell: pwsh
+        run: |
+          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $csc)) { throw "C# compiler not found: $csc" }
+          & $csc /nologo /target:winexe /platform:x64 /reference:System.Windows.Forms.dll /win32icon:assets\ai-aharon.ico /out:release-payload\AI-Aharon.exe installer\launcher.cs
+          if ($LASTEXITCODE -ne 0) { throw "Launcher compilation failed" }
+
+      - name: Install Inno Setup if needed
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --version=6.7.1 -y --no-progress --allow-downgrade
+          }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DMyAppVersion=$env:VERSION" "installer\AI-Aharon.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - name: Optionally sign installer
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.WINDOWS_CERT_PFX_B64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PFX_B64)) {
+            Write-Host "No signing certificate configured; installer will be unsigned."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          $cert = $null
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+            $securePassword = ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force
+            $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
+            if ($null -eq $cert) { throw "Code-signing certificate import failed" }
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
+              Where-Object FullName -Match 'x64' | Sort-Object FullName -Descending | Select-Object -First 1
+            if ($null -eq $signtool) { throw "signtool.exe not found" }
+            $installer = "dist\AI-Aharon-Setup-$env:VERSION.exe"
+            & $signtool.FullName sign /fd SHA256 /td SHA256 /tr https://timestamp.digicert.com /sha1 $cert.Thumbprint $installer
+            if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed" }
+          } finally {
+            if ($null -ne $cert) { Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force -ErrorAction SilentlyContinue }
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Generate update metadata
+        shell: pwsh
+        run: |
+          $name = "AI-Aharon-Setup-$env:VERSION.exe"
+          $installer = "dist\$name"
+          $stableName = "AI-Aharon-Setup.exe"
+          $stableInstaller = "dist\$stableName"
+          Copy-Item $installer $stableInstaller -Force
+          $sha = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $stableSha = (Get-FileHash $stableInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne $stableSha) { throw "Stable installer alias hash mismatch" }
+          $url = "https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/latest/download/$stableName"
+          [ordered]@{
+            version = $env:VERSION
+            url = $url
+            sha256 = $sha
+            mandatory = $false
+            notes = "AI Aharon $env:VERSION"
+          } | ConvertTo-Json | Set-Content "dist\update.json" -Encoding utf8
+          @(
+            "$sha  $name",
+            "$sha  $stableName"
+          ) | Set-Content "dist\checksums.sha256" -Encoding ascii
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: AI-Aharon-Windows-${{ env.VERSION }}
+          path: |
+            dist/AI-Aharon-Setup-${{ env.VERSION }}.exe
+            dist/AI-Aharon-Setup.exe
+            dist/update.json
+            dist/checksums.sha256
+          if-no-files-found: error
+
+  publish-release:
+    needs: build-windows-installer
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build-windows-installer.outputs.version }}
+      TAG_NAME: ${{ needs.build-windows-installer.outputs.tag_name }}
+    steps:
+      - name: Download immutable build artifact
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          mkdir -p dist
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "AI-Aharon-Windows-$VERSION" --dir dist
+
+      - name: Publish GitHub Release
+        run: |
+          files=(
+            "dist/AI-Aharon-Setup-$VERSION.exe"
+            "dist/AI-Aharon-Setup.exe"
+            "dist/update.json"
+            "dist/checksums.sha256"
+          )
+          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --generate-notes --title "AI Aharon $VERSION"
+          fi

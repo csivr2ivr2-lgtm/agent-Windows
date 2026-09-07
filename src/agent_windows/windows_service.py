@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -11,13 +12,11 @@ SERVICE_CLASS_STRING = "agent_windows.windows_service.AgentWindowsService"
 
 
 def _project_root() -> Path:
+    """Return the writable machine state root used for config, memory, and logs."""
     configured = os.getenv("AGENT_WINDOWS_HOME", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
 
-    # A real Windows service runs as LocalSystem and should not depend on a
-    # per-user profile/virtualenv. The installer places the service runtime
-    # under ProgramData and copies its .env there.
     program_data = os.getenv("PROGRAMDATA", "").strip()
     if program_data:
         machine_root = Path(program_data) / "AgentWindowsAI"
@@ -25,6 +24,19 @@ def _project_root() -> Path:
             return machine_root.resolve()
 
     # Developer / CLI fallback.
+    return Path(__file__).resolve().parents[2]
+
+
+def _install_root() -> Path:
+    """Return the admin-protected program root containing runtime and media tools."""
+    configured = os.getenv("AGENT_WINDOWS_INSTALL_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    executable = Path(sys.executable).resolve()
+    if executable.parent.name.casefold() == "python-runtime":
+        return executable.parent.parent
+
     return Path(__file__).resolve().parents[2]
 
 
@@ -47,8 +59,8 @@ if sys.platform.startswith("win"):
             _svc_name_ = SERVICE_NAME
             _svc_display_name_ = "Agent Windows AI"
             _svc_description_ = (
-                "Background AI runtime for Agent Windows. "
-                "Audio stays in the logged-in user session."
+                "Low-privilege background AI runtime for Agent Windows. "
+                "Audio and interactive computer use stay in the logged-in user session."
             )
 
             def __init__(self, args):
@@ -68,12 +80,24 @@ if sys.platform.startswith("win"):
                 from .runtime import AgentRuntime
                 from .service_api import ServiceBackend
 
-                root = _project_root()
+                state_root = _project_root()
+                install_root = _install_root()
                 previous_cwd = Path.cwd()
-                os.environ.setdefault("AGENT_WINDOWS_HOME", str(root))
-                os.chdir(root)
+                os.environ.setdefault("AGENT_WINDOWS_HOME", str(state_root))
+                os.environ.setdefault("AGENT_WINDOWS_INSTALL_ROOT", str(install_root))
+                bundled_tools = install_root / "tools"
+                if bundled_tools.is_dir():
+                    os.environ["PATH"] = (
+                        str(bundled_tools) + os.pathsep + os.environ.get("PATH", "")
+                    )
+                os.chdir(install_root)
                 try:
-                    settings = Settings.from_env(root / ".env")
+                    settings = Settings.from_env(state_root / ".env")
+                    if not settings.data_dir.is_absolute():
+                        settings = replace(
+                            settings,
+                            data_dir=(state_root / settings.data_dir).resolve(),
+                        )
                     configure_logging(settings.log_level)
                     servicemanager.LogInfoMsg("Agent Windows AI service starting")
                     try:
@@ -92,7 +116,8 @@ if sys.platform.startswith("win"):
                             worker.join(timeout=5)
                     except Exception:
                         servicemanager.LogErrorMsg(
-                            "Agent Windows AI service crashed:\n" + _format_current_exception()
+                            "Agent Windows AI service crashed:\n"
+                            + _format_current_exception()
                         )
                         raise
                     finally:
@@ -109,25 +134,21 @@ def _format_current_exception() -> str:
 
 def _run_service_command_line() -> int:
     if not sys.platform.startswith("win"):
-        print("Windows service support is only available on Windows.", file=sys.stderr)
+        print("Windows service mode is only available on Windows.", file=sys.stderr)
         return 2
     if _PYWIN32_IMPORT_ERROR is not None:
-        print(
-            "pywin32 is required. Run: .\\.venv\\Scripts\\python.exe -m pip install -e .",
-            file=sys.stderr,
-        )
+        print(f"pywin32 is required: {_PYWIN32_IMPORT_ERROR}", file=sys.stderr)
         return 2
-
     service_class = globals().get("AgentWindowsService")
     if service_class is None:
         print("Windows service class is unavailable.", file=sys.stderr)
         return 2
-
-    # When this module is launched with ``python -m``, pywin32 otherwise
-    # derives the service class from ``__main__`` / argv[0] and stores a file
-    # path-like value in HKLM\...\PythonClass. pythonservice.exe cannot import
-    # that value when SCM starts the service, which surfaces as error 1053.
-    # Register the stable import path explicitly.
+    # win32serviceutil is imported at module load on Windows. Reuse that
+    # module-level reference so the service class path and the test variant
+    # remain stable instead of importing it again under a different context.
+    # pywin32 persists this import path into the service registry. The test
+    # variant has a synthetic module name, so explicitly keep the stable public
+    # module path that pythonservice.exe can import when the SCM starts it.
     win32serviceutil.HandleCommandLine(
         service_class, serviceClassString=SERVICE_CLASS_STRING
     )

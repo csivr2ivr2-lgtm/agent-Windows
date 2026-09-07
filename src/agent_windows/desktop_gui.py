@@ -36,6 +36,7 @@ HEBREW_LABELS = {
     "connected": "שירות מחובר",
     "disconnected": "שירות לא זמין",
     "voice_only": "שיחה קולית רציפה",
+    "hint": "אין צורך ללחוץ כדי לדבר — השיחה רציפה.",
     "end": "סיום שיחה",
 }
 
@@ -85,12 +86,21 @@ def _apply_windows_icon(root) -> None:
 class AgentDesktopApp:
     """Voice-only, continuous turn-taking desktop client."""
 
-    def __init__(self, root, runtime: AgentRuntime, settings: Settings, *, auto_start: bool = True):
+    def __init__(
+        self,
+        root,
+        runtime: AgentRuntime,
+        settings: Settings,
+        *,
+        env_path: str | Path | None = None,
+        auto_start: bool = True,
+    ):
         import tkinter as tk
         from tkinter import ttk
 
         self.tk, self.ttk = tk, ttk
         self.root, self.runtime, self.settings = root, runtime, settings
+        self.env_path = Path(env_path or (Path.cwd() / ".env")).resolve()
         self._closing = threading.Event()
         self._call_active = threading.Event()
         self._call_started_at: float | None = None
@@ -107,7 +117,19 @@ class AgentDesktopApp:
         self._start_health_monitor()
         self._start_hotkey_listener()
         self._tick_timer()
-        if auto_start:
+        root.after(2500, self._auto_check_update)
+        needs_setup = not any(
+            (
+                getattr(settings, "groq_key", ""),
+                getattr(settings, "gemini_key", ""),
+                getattr(settings, "openrouter_key", ""),
+                getattr(settings, "local_llm_url", ""),
+                getattr(settings, "relay_url", ""),
+            )
+        )
+        if needs_setup:
+            root.after(450, self._open_settings)
+        elif auto_start:
             root.after(350, self.start_call)
 
     def _build_ui(self) -> None:
@@ -129,6 +151,13 @@ class AgentDesktopApp:
         ttk.Label(header, text=APP_NAME, font=("Segoe UI", 21, "bold"), style="Header.TLabel").pack(side="right")
         self.service_label = ttk.Label(header, text="בודק חיבור…", style="Header.TLabel")
         self.service_label.pack(side="left")
+        button_cls = getattr(ttk, "Button", tk.Button)
+        button_cls(header, text="⚙ הגדרות", command=self._open_settings).pack(
+            side="left", padx=(8, 0)
+        )
+        button_cls(header, text="↻ עדכון", command=lambda: self._check_update(manual=True)).pack(
+            side="left", padx=(8, 0)
+        )
 
         card = ttk.Frame(outer, padding=(28, 34), style="Card.TFrame")
         card.pack(fill="both", expand=True)
@@ -159,6 +188,110 @@ class AgentDesktopApp:
             cursor="hand2",
         ).pack(pady=(8, 4))
         ttk.Label(outer, text="Ctrl + Alt + Space פותח שיחה קולית מכל מקום", anchor="center", style="Header.TLabel").pack(fill="x", pady=(14, 0))
+
+    def _open_settings(self) -> None:  # pragma: no cover - Tk callback
+        from .settings_ui import show_settings_window
+
+        show_settings_window(self.root, self.env_path, on_saved=self._settings_saved)
+
+    def _settings_saved(self) -> None:  # pragma: no cover - Tk callback
+        self.service_label.configure(text="● ההגדרות נשמרו — נדרש אתחול")
+
+    def _auto_check_update(self) -> None:  # pragma: no cover - Tk callback
+        if not self._closing.is_set():
+            self._check_update(manual=False)
+
+    def _show_update_error(self, title: str, message: str) -> None:  # pragma: no cover
+        from tkinter import messagebox
+
+        if not self._closing.is_set():
+            messagebox.showerror(title, message, parent=self.root)
+
+    def _show_current_version(self) -> None:  # pragma: no cover
+        from tkinter import messagebox
+        from .updater import current_version
+
+        messagebox.showinfo(
+            "AI Aharon",
+            f"מותקנת הגרסה העדכנית ({current_version()}).",
+            parent=self.root,
+        )
+
+    def _update_check_worker(self, manual: bool) -> None:
+        from .updater import check_for_update
+
+        try:
+            info = check_for_update()
+        except Exception as exc:
+            LOGGER.debug("Update check failed", exc_info=True)
+            if manual and not self._closing.is_set():
+                self.root.after(
+                    0,
+                    lambda message=str(exc): self._show_update_error(
+                        "בדיקת עדכון נכשלה", message
+                    ),
+                )
+            return
+        if not self._closing.is_set():
+            self.root.after(0, lambda: self._handle_update_result(info, manual))
+
+    def _handle_update_result(self, info, manual: bool) -> None:  # pragma: no cover
+        if info is None:
+            if manual:
+                self._show_current_version()
+            return
+        self._offer_update(info)
+
+    def _offer_update(self, info) -> None:  # pragma: no cover
+        from tkinter import messagebox
+
+        notes = f"\n\n{info.notes}" if info.notes else ""
+        accepted = info.mandatory or messagebox.askyesno(
+            "עדכון זמין",
+            f"גרסה {info.version} זמינה. להוריד ולהתקין עכשיו?{notes}",
+            parent=self.root,
+        )
+        if not accepted:
+            return
+        threading.Thread(
+            target=lambda: self._download_update_worker(info),
+            daemon=True,
+            name="AiAharonUpdateDownload",
+        ).start()
+
+    def _download_update_worker(self, info) -> None:
+        from .updater import download_update
+
+        try:
+            installer = download_update(info)
+        except Exception as exc:
+            LOGGER.exception("Update download failed")
+            if not self._closing.is_set():
+                self.root.after(
+                    0,
+                    lambda message=str(exc): self._show_update_error("העדכון נכשל", message),
+                )
+            return
+        if not self._closing.is_set():
+            self.root.after(0, lambda: self._launch_downloaded_update(installer))
+
+    def _launch_downloaded_update(self, installer) -> None:  # pragma: no cover
+        from .updater import launch_installer
+
+        try:
+            launch_installer(installer)
+        except Exception as exc:
+            LOGGER.exception("Update launch failed")
+            self._show_update_error("העדכון נכשל", str(exc))
+            return
+        self.root.after(400, self.close)
+
+    def _check_update(self, *, manual: bool) -> None:  # pragma: no cover - threaded Tk callback
+        threading.Thread(
+            target=lambda: self._update_check_worker(manual),
+            daemon=True,
+            name="AiAharonUpdateCheck",
+        ).start()
 
     def _set_status(self, value: str) -> None:
         if threading.current_thread() is not threading.main_thread():
@@ -300,7 +433,13 @@ def main(argv=None) -> int:
         import tkinter as tk
         root = tk.Tk()
         runtime = AgentRuntime(settings)
-        AgentDesktopApp(root, runtime, settings, auto_start=not args.minimized)
+        AgentDesktopApp(
+            root,
+            runtime,
+            settings,
+            env_path=env_path,
+            auto_start=not args.minimized,
+        )
         if args.minimized:
             root.after(200, root.iconify)
         root.mainloop()
