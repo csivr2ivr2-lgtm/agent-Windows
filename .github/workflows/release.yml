@@ -5,11 +5,6 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to build (for example 0.2.0)"
-        required: true
-        default: "0.2.0"
 
 permissions:
   contents: read
@@ -34,37 +29,22 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Resolve release version
+      - name: Resolve trusted release version
         id: release_version
         shell: pwsh
-        env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if ($env:REF_TYPE -eq "tag") {
-            $version = $env:REF_NAME.TrimStart("v")
-            $tag = $env:REF_NAME
-          } else {
-            $version = $env:INPUT_VERSION.TrimStart("v")
-            $tag = "v$version"
+          $version = (python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])").Trim()
+          if (-not [regex]::IsMatch($version, '\A[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?\z')) {
+            throw "Invalid project version in pyproject.toml"
           }
-          if ($version -notmatch '^\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$') {
-            throw "Invalid version: $version"
+          $tag = "v$version"
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne $tag) {
+            throw "Release tag must match pyproject.toml version."
           }
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
           "TAG_NAME=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "tag_name=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
-      - name: Stamp package version
-        shell: pwsh
-        run: |
-          $path = "pyproject.toml"
-          $text = Get-Content $path -Raw
-          $rx = [regex]'(?m)^version\s*=\s*"[^"]+"'
-          $text = $rx.Replace($text, "version = `"$env:VERSION`"", 1)
-          Set-Content -Path $path -Value $text -Encoding utf8
 
       - name: Validate Python source
         shell: pwsh
@@ -95,7 +75,6 @@ jobs:
           New-Item -ItemType Directory $runtime | Out-Null
           & robocopy.exe $basePython $runtime /E /R:2 /W:1 /XD __pycache__ /XF *.pyc
           if ($LASTEXITCODE -ge 8) { throw "Copying Python runtime failed: $LASTEXITCODE" }
-          & "$runtime\python.exe" -m pip install --disable-pip-version-check --upgrade pip
           & "$runtime\python.exe" -m pip install --disable-pip-version-check ".[realtime]"
           if ($LASTEXITCODE -ne 0) { throw "Installing bundled dependencies failed" }
 
@@ -197,8 +176,6 @@ jobs:
 
       - name: Generate update metadata
         shell: pwsh
-        env:
-          REPOSITORY: ${{ github.repository }}
         run: |
           $name = "AI-Aharon-Setup-$env:VERSION.exe"
           $installer = "dist\$name"
@@ -208,7 +185,7 @@ jobs:
           $sha = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
           $stableSha = (Get-FileHash $stableInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($sha -ne $stableSha) { throw "Stable installer alias hash mismatch" }
-          $url = "https://github.com/$env:REPOSITORY/releases/latest/download/$stableName"
+          $url = "https://github.com/csivr2ivr2-lgtm/agent-Windows/releases/latest/download/$stableName"
           [ordered]@{
             version = $env:VERSION
             url = $url
