@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import webbrowser
 from pathlib import Path
 from typing import Callable
 
@@ -23,6 +24,53 @@ SECRET_FIELDS = (
     ("WIGOLO_TOKEN", "Wigolo token"),
     ("AGENT_RELAY_TOKEN", "Relay token"),
 )
+
+PRIMARY_PROVIDER_KEYS = (
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+)
+
+KEY_ACTIONS = {
+    "GROQ_API_KEY": ("צור מפתח ↗", "https://console.groq.com/keys"),
+    "GEMINI_API_KEY": ("צור מפתח ↗", "https://aistudio.google.com/apikey"),
+    "OPENROUTER_API_KEY": ("צור מפתח ↗", "https://openrouter.ai/settings/keys"),
+    "ASSEMBLYAI_API_KEY": ("צור מפתח ↗", "https://www.assemblyai.com/dashboard"),
+    "DEEPGRAM_API_KEY": ("צור מפתח ↗", "https://console.deepgram.com/"),
+    "ELEVENLABS_API_KEY": ("צור מפתח ↗", "https://elevenlabs.io/app/settings/api-keys"),
+    "CARTESIA_API_KEY": ("צור מפתח ↗", "https://play.cartesia.ai/keys"),
+    "LIVEKIT_API_KEY": ("פתח Credentials ↗", "https://cloud.livekit.io/"),
+    "LIVEKIT_API_SECRET": ("פתח Credentials ↗", "https://cloud.livekit.io/"),
+    "FIRECRAWL_API_KEY": ("צור מפתח ↗", "https://www.firecrawl.dev/app"),
+    "OPENVIKING_API_KEY": ("הוראות ↗", "https://docs.openviking.ai/en/guides/04-authentication"),
+    "QDRANT_API_KEY": ("צור מפתח ↗", "https://cloud.qdrant.io/"),
+    "PINECONE_API_KEY": ("צור מפתח ↗", "https://app.pinecone.io/"),
+    "WIGOLO_TOKEN": ("הוראות ↗", "https://knockoutez.github.io/wigolo/docs/installation/"),
+    "AGENT_RELAY_TOKEN": (
+        "הוראות ↗",
+        "https://github.com/csivr2ivr2-lgtm/agent-Windows/blob/main/relay/README.md",
+    ),
+}
+
+_PLACEHOLDER_MARKERS = (
+    "your-key",
+    "your_api_key",
+    "replace-me",
+    "change-me",
+    "changeme",
+    "example",
+)
+
+
+def _looks_configured(value: str) -> bool:
+    clean = value.strip().casefold()
+    return bool(clean) and not any(marker in clean for marker in _PLACEHOLDER_MARKERS)
+
+
+def has_primary_provider_key(values: dict[str, str]) -> bool:
+    """Return True when at least one usable cloud LLM key is configured."""
+    return any(_looks_configured(values.get(key, "")) for key in PRIMARY_PROVIDER_KEYS)
+
 
 TEXT_FIELDS = (
     ("GROQ_MODEL", "Groq model"),
@@ -124,7 +172,34 @@ def update_env_file(path: str | Path, updates: dict[str, str]) -> None:
     _atomic_replace_text(file, _render_env(original, updates))
 
 
-def _add_section(ttk, tk, body, values, entries, secret_entries, title, fields, *, secret=False):
+def _open_key_link(url: str, parent, messagebox) -> None:
+    try:
+        opened = webbrowser.open_new_tab(url)
+    except Exception as exc:
+        messagebox.showerror("פתיחת קישור נכשלה", str(exc), parent=parent)
+        return
+    if not opened:
+        messagebox.showerror(
+            "פתיחת קישור נכשלה",
+            "לא הצלחתי לפתוח את הדפדפן. אפשר להעתיק את הכתובת ידנית.",
+            parent=parent,
+        )
+
+
+def _add_section(
+    ttk,
+    tk,
+    body,
+    values,
+    entries,
+    secret_entries,
+    title,
+    fields,
+    *,
+    secret=False,
+    parent=None,
+    messagebox=None,
+):
     ttk.Label(body, text=title, font=("Segoe UI", 11, "bold")).pack(
         anchor="e", fill="x", pady=(12, 5)
     )
@@ -132,6 +207,14 @@ def _add_section(ttk, tk, body, values, entries, secret_entries, title, fields, 
         row = ttk.Frame(body)
         row.pack(fill="x", pady=4)
         ttk.Label(row, text=label, width=22, anchor="e").pack(side="right", padx=(8, 0))
+        action = KEY_ACTIONS.get(key) if secret else None
+        if action and parent is not None and messagebox is not None:
+            action_text, url = action
+            ttk.Button(
+                row,
+                text=action_text,
+                command=lambda target=url: _open_key_link(target, parent, messagebox),
+            ).pack(side="left", padx=(0, 8))
         variable = tk.StringVar(value=values.get(key, ""))
         entry = ttk.Entry(row, textvariable=variable, show="•" if secret else "")
         entry.pack(side="right", fill="x", expand=True)
@@ -169,7 +252,7 @@ def show_settings_window(  # pragma: no cover - interactive Tk window
     env_path: str | Path,
     *,
     on_saved: Callable[[], None] | None = None,
-) -> None:
+) -> object:
     import tkinter as tk
     from tkinter import messagebox, ttk
 
@@ -203,7 +286,24 @@ def show_settings_window(  # pragma: no cover - interactive Tk window
 
     entries: dict[str, tk.StringVar] = {}
     secret_entries = []
-    _add_section(ttk, tk, body, values, entries, secret_entries, "מפתחות API", SECRET_FIELDS, secret=True)
+    ttk.Label(
+        body,
+        text="כדי להפעיל את הצ'אט בענן צריך לפחות מפתח אחד: Groq, Gemini או OpenRouter. שאר המפתחות אופציונליים לפי היכולות שבהן משתמשים.",
+        wraplength=580,
+    ).pack(anchor="e", fill="x", pady=(0, 6))
+    _add_section(
+        ttk,
+        tk,
+        body,
+        values,
+        entries,
+        secret_entries,
+        "מפתחות API",
+        SECRET_FIELDS,
+        secret=True,
+        parent=window,
+        messagebox=messagebox,
+    )
     _add_section(ttk, tk, body, values, entries, secret_entries, "מודלים וניתוב", TEXT_FIELDS)
 
     show_secrets = tk.BooleanVar(value=False)
@@ -226,3 +326,4 @@ def show_settings_window(  # pragma: no cover - interactive Tk window
         command=lambda: _save_settings(window, env_path, entries, on_saved, messagebox),
     ).pack(side="right")
     window.grab_set()
+    return window
