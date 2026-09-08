@@ -15,12 +15,44 @@ internal static class Program
         );
         string python = Path.Combine(installRoot, "python-runtime", "pythonw.exe");
         string envFile = Path.Combine(stateRoot, ".env");
+        string exampleEnv = Path.Combine(installRoot, ".env.example");
         string tools = Path.Combine(installRoot, "tools");
 
-        if (!File.Exists(python) || !File.Exists(envFile))
+        if (!File.Exists(python))
         {
             MessageBox.Show(
-                "AI Aharon installation is incomplete. Run the installer again.",
+                "AI Aharon cannot find its bundled Python runtime.\n\nMissing file:\n" + python +
+                "\n\nInstall AI Aharon again using the latest installer.",
+                "AI Aharon",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error
+            );
+            return 2;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(stateRoot);
+            if (!File.Exists(envFile))
+            {
+                if (!File.Exists(exampleEnv))
+                {
+                    MessageBox.Show(
+                        "AI Aharon cannot initialize its settings because the configuration template is missing.\n\nMissing file:\n" + exampleEnv,
+                        "AI Aharon",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error
+                    );
+                    return 2;
+                }
+                File.Copy(exampleEnv, envFile, false);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                "AI Aharon could not initialize its settings.\n\nSettings folder:\n" + stateRoot +
+                "\n\n" + ex.Message,
                 "AI Aharon",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error

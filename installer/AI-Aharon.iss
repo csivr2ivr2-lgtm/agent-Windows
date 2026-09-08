@@ -1,6 +1,6 @@
 #define MyAppName "AI Aharon"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.0"
+  #define MyAppVersion "0.2.1"
 #endif
 #define MyAppPublisher "AI Aharon"
 #define MyAppExeName "AI-Aharon.exe"
@@ -44,13 +44,47 @@ Name: "{autodesktop}\AI Aharon"; Filename: "{app}\{#MyAppExeName}"; Tasks: deskt
 Name: "{userstartup}\AI Aharon"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--minimized"; Tasks: autostart
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -File ""{app}\scripts\installer-apply.ps1"" -InstallRoot ""{app}"""; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch AI Aharon"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -File ""{app}\scripts\installer-remove.ps1"" -InstallRoot ""{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAgentWindowsService"
 
 [Code]
+procedure RunAgentConfiguration;
+var
+  ResultCode: Integer;
+  Params: String;
+begin
+  Params := '-NoProfile -NonInteractive -File "' +
+    ExpandConstant('{app}\scripts\installer-apply.ps1') +
+    '" -InstallRoot "' + ExpandConstant('{app}') +
+    '"';
+  if not Exec(
+    ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    Params,
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  ) then
+  begin
+    RaiseException('AI Aharon could not start its configuration step.');
+  end;
+  if ResultCode <> 0 then
+  begin
+    RaiseException(Format(
+      'AI Aharon configuration failed (exit code %d).',
+      [ResultCode]
+    ));
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    RunAgentConfiguration;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
