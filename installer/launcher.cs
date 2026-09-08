@@ -15,14 +15,14 @@ internal static class Program
         );
         string python = Path.Combine(installRoot, "python-runtime", "pythonw.exe");
         string envFile = Path.Combine(stateRoot, ".env");
-        string exampleEnv = Path.Combine(installRoot, ".env.example");
+        string envTemplate = Path.Combine(installRoot, ".env.example");
         string tools = Path.Combine(installRoot, "tools");
 
         if (!File.Exists(python))
         {
             MessageBox.Show(
-                "AI Aharon cannot find its bundled Python runtime.\n\nMissing file:\n" + python +
-                "\n\nInstall AI Aharon again using the latest installer.",
+                "AI Aharon cannot find its bundled Python runtime.\n\nMissing: " + python +
+                "\n\nRun the latest installer again.",
                 "AI Aharon",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error
@@ -35,24 +35,20 @@ internal static class Program
             Directory.CreateDirectory(stateRoot);
             if (!File.Exists(envFile))
             {
-                if (!File.Exists(exampleEnv))
+                if (File.Exists(envTemplate))
                 {
-                    MessageBox.Show(
-                        "AI Aharon cannot initialize its settings because the configuration template is missing.\n\nMissing file:\n" + exampleEnv,
-                        "AI Aharon",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error
-                    );
-                    return 2;
+                    File.Copy(envTemplate, envFile, false);
                 }
-                File.Copy(exampleEnv, envFile, false);
+                else
+                {
+                    File.WriteAllText(envFile, "# AI Aharon local settings\r\n");
+                }
             }
         }
         catch (Exception ex)
         {
             MessageBox.Show(
-                "AI Aharon could not initialize its settings.\n\nSettings folder:\n" + stateRoot +
-                "\n\n" + ex.Message,
+                "AI Aharon could not initialize its local settings.\n\n" + ex.Message,
                 "AI Aharon",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error
@@ -67,7 +63,7 @@ internal static class Program
 
         var start = new ProcessStartInfo();
         start.FileName = python;
-        start.Arguments = minimized ? "-m agent_windows.desktop_gui --minimized" : "-m agent_windows.desktop_gui";
+        start.Arguments = minimized ? "-m agent_windows.first_run --minimized" : "-m agent_windows.first_run";
         start.WorkingDirectory = stateRoot;
         start.UseShellExecute = false;
         start.CreateNoWindow = true;
