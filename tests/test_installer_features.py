@@ -265,7 +265,7 @@ class DistributionHardeningTests(unittest.TestCase):
         self.assertIn("AppDomain.CurrentDomain.BaseDirectory", source)
         self.assertNotIn("StringBuilder", source)
         self.assertNotIn("command.Append", source)
-        self.assertIn('start.Arguments = minimized ? "-m agent_windows.desktop_gui --minimized"', source)
+        self.assertIn('start.Arguments = minimized ? "-m agent_windows.first_run --minimized"', source)
         self.assertIn('Path.Combine(installRoot, "python-runtime", "pythonw.exe")', source)
         self.assertIn('Path.Combine(stateRoot, ".env")', source)
 
