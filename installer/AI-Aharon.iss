@@ -1,31 +1,32 @@
 #define MyAppName "AI Aharon"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.1"
+  #define MyAppVersion "0.2.0"
 #endif
 #define MyAppPublisher "AI Aharon"
 #define MyAppExeName "AI-Aharon.exe"
+#define MyAppId "{7FD6A2B8-4F6A-4F18-8D84-7A5D59C62710}"
 
 [Setup]
-AppId={{7FD6A2B8-4F6A-4F18-8D84-7A5D59C62710}
+AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\AI Aharon
 DefaultGroupName=AI Aharon
+DisableProgramGroupPage=yes
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
 OutputBaseFilename=AI-Aharon-Setup-{#MyAppVersion}
 SetupIconFile=..\assets\ai-aharon.ico
-UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-SetupLogging=yes
 CloseApplications=yes
 RestartApplications=no
-UsePreviousAppDir=yes
+UninstallDisplayIcon={app}\AI-Aharon.exe
+VersionInfoVersion={#MyAppVersion}
 
 [Files]
 Source: "..\release-payload\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -35,19 +36,19 @@ Name: "{commonappdata}\AgentWindowsAI"
 Name: "{commonappdata}\AgentWindowsAI\data"
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 Name: "autostart"; Description: "Start AI Aharon when I sign in"; GroupDescription: "Startup:"; Flags: checkedonce
 
 [Icons]
-Name: "{group}\AI Aharon"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\AI Aharon"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
-Name: "{userstartup}\AI Aharon"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--minimized"; Tasks: autostart
+Name: "{autoprograms}\AI Aharon"; Filename: "{app}\AI-Aharon.exe"
+Name: "{autodesktop}\AI Aharon"; Filename: "{app}\AI-Aharon.exe"; Tasks: desktopicon
+Name: "{userstartup}\AI Aharon"; Filename: "{app}\AI-Aharon.exe"; Parameters: "--minimized"; Tasks: autostart
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch AI Aharon"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\AI-Aharon.exe"; Description: "Launch AI Aharon"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -File ""{app}\scripts\installer-remove.ps1"" -InstallRoot ""{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAgentWindowsService"
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -File ""{app}\scripts\installer-remove.ps1"" -InstallRoot ""{app}"""; Flags: runhidden waituntilterminated
 
 [Code]
 procedure RunAgentConfiguration;
@@ -72,10 +73,9 @@ begin
   end;
   if ResultCode <> 0 then
   begin
-    RaiseException(Format(
-      'AI Aharon configuration failed (exit code %d).',
-      [ResultCode]
-    ));
+    RaiseException(
+      'AI Aharon configuration failed (exit code ' + IntToStr(ResultCode) + ').'
+    );
   end;
 end;
 
