@@ -247,11 +247,20 @@ def _save_settings(window, env_path, entries, on_saved, messagebox) -> None:
     window.destroy()
 
 
+def _cancel_settings(window, on_cancel: Callable[[], None] | None) -> None:
+    try:
+        window.destroy()
+    finally:
+        if on_cancel:
+            on_cancel()
+
+
 def show_settings_window(  # pragma: no cover - interactive Tk window
     parent,
     env_path: str | Path,
     *,
     on_saved: Callable[[], None] | None = None,
+    on_cancel: Callable[[], None] | None = None,
 ) -> object:
     import tkinter as tk
     from tkinter import messagebox, ttk
@@ -261,7 +270,6 @@ def show_settings_window(  # pragma: no cover - interactive Tk window
     window.title("AI Aharon — הגדרות")
     window.geometry("650x720")
     window.minsize(560, 520)
-    window.transient(parent)
 
     outer = ttk.Frame(window, padding=16)
     outer.pack(fill="both", expand=True)
@@ -319,7 +327,7 @@ def show_settings_window(  # pragma: no cover - interactive Tk window
 
     buttons = ttk.Frame(window, padding=(16, 8, 16, 16))
     buttons.pack(fill="x")
-    ttk.Button(buttons, text="ביטול", command=window.destroy).pack(side="left")
+    ttk.Button(buttons, text="ביטול", command=lambda: _cancel_settings(window, on_cancel)).pack(side="left")
     ttk.Button(
         buttons,
         text="שמור",

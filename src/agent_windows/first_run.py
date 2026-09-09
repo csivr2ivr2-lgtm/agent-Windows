@@ -35,15 +35,27 @@ def main(argv=None) -> int:
         saved["value"] = True
         root.after(0, root.quit)
 
-    window = show_settings_window(root, env_path, on_saved=finish_saved)
+    def finish_cancelled() -> None:
+        root.after(0, root.quit)
+
+    window = show_settings_window(
+        root,
+        env_path,
+        on_saved=finish_saved,
+        on_cancel=finish_cancelled,
+    )
 
     def cancel_setup() -> None:
         try:
             window.destroy()
         finally:
-            root.quit()
+            finish_cancelled()
 
     window.protocol("WM_DELETE_WINDOW", cancel_setup)
+    window.update_idletasks()
+    window.deiconify()
+    window.lift()
+    window.focus_force()
     root.mainloop()
     root.destroy()
 

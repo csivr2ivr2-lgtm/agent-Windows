@@ -36,12 +36,28 @@ class _Window:
     def __init__(self):
         self.protocols = {}
         self.destroyed = False
+        self.updated = False
+        self.deiconified = False
+        self.lifted = False
+        self.focused = False
 
     def protocol(self, name, callback):
         self.protocols[name] = callback
 
     def destroy(self):
         self.destroyed = True
+
+    def update_idletasks(self):
+        self.updated = True
+
+    def deiconify(self):
+        self.deiconified = True
+
+    def lift(self):
+        self.lifted = True
+
+    def focus_force(self):
+        self.focused = True
 
 
 class FirstRunTests(unittest.TestCase):
@@ -69,7 +85,8 @@ class FirstRunTests(unittest.TestCase):
         desktop_main = mock.Mock(return_value=9)
         fake_desktop = types.SimpleNamespace(main=desktop_main)
 
-        def show_settings(_root, _env_path, *, on_saved):
+        def show_settings(_root, _env_path, *, on_saved, on_cancel):
+            self.assertIsNotNone(on_cancel)
             on_saved()
             return window
 
@@ -89,6 +106,10 @@ class FirstRunTests(unittest.TestCase):
         self.assertTrue(root.quit_called)
         self.assertTrue(root.destroyed)
         self.assertIn("WM_DELETE_WINDOW", window.protocols)
+        self.assertTrue(window.updated)
+        self.assertTrue(window.deiconified)
+        self.assertTrue(window.lifted)
+        self.assertTrue(window.focused)
         desktop_main.assert_called_once_with(["--env", str(env.resolve())])
 
     def test_closing_settings_without_key_exits_cleanly(self):
