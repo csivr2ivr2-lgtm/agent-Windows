@@ -32,9 +32,6 @@ jobs:
 
   tests-coverage:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
     env:
       CODACY_PROJECT_TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
     steps:
@@ -45,29 +42,7 @@ jobs:
           cache: pip
       - run: python -m pip install --disable-pip-version-check --requirement scripts/ci-requirements.txt
       - run: python -m pip install --disable-pip-version-check --no-deps -e .
-      - name: Run unit tests with coverage
-        id: unit_tests
-        shell: bash
-        run: |
-          set +e
-          coverage run -m unittest discover -s tests -v 2>&1 | tee test-output.txt
-          exit_code=${PIPESTATUS[0]}
-          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
-          exit "$exit_code"
-      - name: Report temporary unit test diagnostics
-        if: failure() && steps.unit_tests.outputs.exit_code != '0'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          {
-            echo '### v0.2.2 unit-test diagnostics'
-            echo
-            echo '```text'
-            tail -n 80 test-output.txt
-            echo '```'
-          } > unit-test-diagnostics.md
-          gh pr comment 4 --repo "$GITHUB_REPOSITORY" --body-file unit-test-diagnostics.md
+      - run: coverage run -m unittest discover -s tests -v
       - run: coverage report
       - run: coverage xml -o cobertura.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
