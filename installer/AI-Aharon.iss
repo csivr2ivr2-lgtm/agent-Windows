@@ -4,10 +4,9 @@
 #endif
 #define MyAppPublisher "AI Aharon"
 #define MyAppExeName "AI-Aharon.exe"
-#define MyAppId "{7FD6A2B8-4F6A-4F18-8D84-7A5D59C62710}"
 
 [Setup]
-AppId={#MyAppId}
+AppId={{7FD6A2B8-4F6A-4F18-8D84-7A5D59C62710}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
