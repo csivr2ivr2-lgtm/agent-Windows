@@ -151,8 +151,10 @@ jobs:
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $iscc "/DMyAppVersion=$env:VERSION" "installer\AI-Aharon.iss"
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          $isccLog = Join-Path $env:RUNNER_TEMP "iscc-output.txt"
+          & $iscc "/DMyAppVersion=$env:VERSION" "installer\AI-Aharon.iss" 2>&1 | Tee-Object -FilePath $isccLog
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) { throw "Inno Setup failed (exit code $exitCode)" }
 
       - name: Optionally sign installer
         id: sign_installer
@@ -238,10 +240,14 @@ jobs:
             "generate_metadata=${{ steps.generate_metadata.outcome }}",
             "upload_artifact=${{ steps.upload_artifact.outcome }}"
           )
+          $isccLog = Join-Path $env:RUNNER_TEMP "iscc-output.txt"
+          if (Test-Path $isccLog) {
+            $lines += "--- ISCC tail ---"
+            $lines += Get-Content $isccLog | Select-Object -Last 80
+          }
           "diagnostics<<EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           $lines | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
 
   publish-release:
     needs: build-windows-installer
@@ -279,7 +285,6 @@ jobs:
             fi
             gh release create "$TAG_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" "${target_args[@]}" --generate-notes --title "AI Aharon $VERSION"
           fi
-
 
   report-build-failure:
     needs: build-windows-installer
