@@ -24,6 +24,7 @@ jobs:
     outputs:
       version: ${{ steps.release_version.outputs.version }}
       tag_name: ${{ steps.release_version.outputs.tag_name }}
+      diagnostics: ${{ steps.collect_status.outputs.diagnostics }}
 
     steps:
       - name: Checkout
@@ -150,8 +151,10 @@ jobs:
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $iscc "/DMyAppVersion=$env:VERSION" "installer\AI-Aharon.iss"
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          $isccLog = Join-Path $env:RUNNER_TEMP "iscc-output.txt"
+          & $iscc "/DMyAppVersion=$env:VERSION" "installer\AI-Aharon.iss" 2>&1 | Tee-Object -FilePath $isccLog
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) { throw "Inno Setup failed (exit code $exitCode)" }
 
       - name: Optionally sign installer
         id: sign_installer
@@ -219,6 +222,35 @@ jobs:
             dist/checksums.sha256
           if-no-files-found: error
 
+      - name: Collect temporary release diagnostics
+        id: collect_status
+        if: always()
+        shell: pwsh
+        run: |
+          $lines = @(
+            "setup_python=${{ steps.setup_python.outcome }}",
+            "release_version=${{ steps.release_version.outcome }}",
+            "validate=${{ steps.validate.outcome }}",
+            "prepare_payload=${{ steps.prepare_payload.outcome }}",
+            "bundle_runtime=${{ steps.bundle_runtime.outcome }}",
+            "bundle_ffmpeg=${{ steps.bundle_ffmpeg.outcome }}",
+            "build_launcher=${{ steps.build_launcher.outcome }}",
+            "install_inno=${{ steps.install_inno.outcome }}",
+            "build_installer=${{ steps.build_installer.outcome }}",
+            "sign_installer=${{ steps.sign_installer.outcome }}",
+            "generate_metadata=${{ steps.generate_metadata.outcome }}",
+            "upload_artifact=${{ steps.upload_artifact.outcome }}"
+          )
+          $isccLog = Join-Path $env:RUNNER_TEMP "iscc-output.txt"
+          if (Test-Path $isccLog) {
+            $lines += "--- ISCC tail ---"
+            $lines += Get-Content $isccLog | Select-Object -Last 80
+          }
+          $delimiter = "DIAG_$([guid]::NewGuid().ToString('N'))"
+          "diagnostics<<$delimiter" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $lines | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $delimiter | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
   publish-release:
     needs: build-windows-installer
     if: github.ref_type == 'tag' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -255,3 +287,25 @@ jobs:
             fi
             gh release create "$TAG_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" "${target_args[@]}" --generate-notes --title "AI Aharon $VERSION"
           fi
+
+  report-release-failure:
+    needs: build-windows-installer
+    if: always() && needs.build-windows-installer.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DIAGNOSTICS: ${{ needs.build-windows-installer.outputs.diagnostics }}
+    steps:
+      - name: Report v0.2.3 diagnostics to temporary PR
+        run: |
+          {
+            echo '### v0.2.3 release diagnostics'
+            echo
+            echo '```text'
+            printf '%s\n' "$DIAGNOSTICS"
+            echo '```'
+          } > release-diagnostics.md
+          gh pr comment 5 --repo "$GITHUB_REPOSITORY" --body-file release-diagnostics.md
