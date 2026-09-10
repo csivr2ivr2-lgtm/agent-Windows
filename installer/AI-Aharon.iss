@@ -1,6 +1,6 @@
 #define MyAppName "AI Aharon"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.3"
+  #define MyAppVersion "0.2.4"
 #endif
 #define MyAppPublisher "AI Aharon"
 #define MyAppExeName "AI-Aharon.exe"
@@ -58,7 +58,7 @@ begin
   Params := '-NoProfile -NonInteractive -File "' +
     ExpandConstant('{app}\scripts\installer-apply.ps1') +
     '" -InstallRoot "' + ExpandConstant('{app}') +
-    '"';
+    '" -AllowServiceFailure';
   if not Exec(
     ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     Params,
@@ -72,7 +72,18 @@ begin
   end;
   if ResultCode <> 0 then
   begin
-    RaiseException('AI Aharon configuration failed (exit code ' + IntToStr(ResultCode) + ').');
+    RaiseException('AI Aharon configuration failed (exit code ' + IntToStr(ResultCode) + '). Check C:\ProgramData\AgentWindowsAI\install.log.');
+  end;
+
+  if FileExists(ExpandConstant('{commonappdata}\AgentWindowsAI\service-install-error.txt')) then
+  begin
+    MsgBox(
+      'AI Aharon was installed and can run locally, but the background service could not start.' + #13#10 + #13#10 +
+      'The desktop app will still open. Service diagnostics were saved to:' + #13#10 +
+      ExpandConstant('{commonappdata}\AgentWindowsAI\install.log'),
+      mbInformation,
+      MB_OK
+    );
   end;
 end;
 
